@@ -3,7 +3,7 @@
   "name": "Augmented View",
   "version": "0.6.0",
   "minAppVersion": "1.8.7",
-  "description": "Colours each sentence by the role it plays (claim, finding, limitation, signpost) and key phrases by kind, for skim reading, with local models you start from the status bar. Never changes the note.",
+  "description": "Colour each sentence of a note by the role it plays, such as claim, finding or limitation, and key phrases by kind, for skim reading. Local models on your own computer do the work, and the note itself is never changed.",
   "author": "Gameboard-dev",
   "isDesktopOnly": true,
   "authorUrl": "https://github.com/Gameboard-dev"
