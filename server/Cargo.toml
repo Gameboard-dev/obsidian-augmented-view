@@ -1,6 +1,6 @@
 [package]
 name = "augmented-view-server"
-version = "0.6.1"
+version = "0.6.2"
 edition = "2021"
 description = "Augmented View's model server: key terms (UDPipe + bge embeddings), sentence colours (Qwen3-4B) and phrase colours (GLiNER2), on the GPU when there is one"
 publish = false
