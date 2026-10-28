@@ -4,6 +4,7 @@ version = "0.6.0"
 edition = "2021"
 description = "Augmented View's model server: key terms (UDPipe + bge embeddings), sentence colours (Qwen3-4B) and phrase colours (GLiNER2), on the GPU when there is one"
 publish = false
+license = "MIT"
 
 # One build per kind of machine (README, "Server"): `cuda` for NVIDIA GPUs (the default), `metal` for Apple GPUs, and
 # `--no-default-features` for the CPU only. Every build falls back to the CPU by itself; a CUDA build on Windows

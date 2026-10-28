@@ -13,7 +13,9 @@ use crate::claims::Category;
 use crate::models::need;
 use crate::text::Doc;
 
-const REPO: &str = "fastino/gliner2-base-v1";
+pub const REPO: &str = "fastino/gliner2-base-v1";
+/// The checkpoint's files this reads (main.rs checks them before start-up when phrase colours are wanted).
+pub const FILES: [&str; 4] = ["config.json", "encoder_config/config.json", "tokenizer.json", "model.safetensors"];
 /// Spans below this confidence are not sent (the plugin's slider then sets its own floor above it): measured, 41% of
 /// the spans at 0.3 or more are a reader's, 47% at 0.5, 51% at 0.7.
 const FLOOR: f32 = 0.3;
@@ -29,10 +31,10 @@ impl Phrases {
     pub fn load() -> Result<Phrases, String> {
         let e = |e: &dyn std::fmt::Display| e.to_string();
         let files = gliner2::config::ModelFiles {
-            config: need(REPO, "config.json").map_err(|x| e(&x))?,
-            encoder_config: need(REPO, "encoder_config/config.json").map_err(|x| e(&x))?,
-            tokenizer: need(REPO, "tokenizer.json").map_err(|x| e(&x))?,
-            weights: need(REPO, "model.safetensors").map_err(|x| e(&x))?,
+            config: need(REPO, FILES[0]).map_err(|x| e(&x))?,
+            encoder_config: need(REPO, FILES[1]).map_err(|x| e(&x))?,
+            tokenizer: need(REPO, FILES[2]).map_err(|x| e(&x))?,
+            weights: need(REPO, FILES[3]).map_err(|x| e(&x))?,
         };
         let tokens = SchemaTransformer::new(&files.tokenizer.to_string_lossy()).map_err(|x| e(&x))?;
         let config: ExtractorConfig = serde_json::from_str(&std::fs::read_to_string(&files.config).map_err(|x| e(&x))?).map_err(|x| e(&x))?;

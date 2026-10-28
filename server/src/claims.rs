@@ -242,7 +242,11 @@ impl Claims {
         let mut out = if stress { self.stress(d)? } else { Vec::new() };
         if !phrases.is_empty() {
             let model = self.phrases.get_or_insert_with(|| crate::phrases::Phrases::load().map_err(|e| {
-                hw::note(format!("phrase colours: GLiNER2 could not load: {e}"));
+                if e.contains(crate::models::MISSING) {
+                    hw::note(format!("phrase colours: {} (about 0.85 GB) is not downloaded; stop and start the server to be asked to download it", crate::phrases::REPO));
+                } else {
+                    hw::note(format!("phrase colours: GLiNER2 could not load: {e}"));
+                }
                 e
             }));
             if let Ok(model) = model {

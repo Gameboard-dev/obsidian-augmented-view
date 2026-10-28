@@ -69,6 +69,10 @@ pub struct App {
     /// shortage the last one reported (native_kit::hw::claims, through its `gpu_shortage` line).
     gpu_mode: String,
     shortage: Option<serde_json::Value>,
+    /// The model files the last server lacked (its `missing` line, exit 4), and whether the user agreed to download
+    /// them: the next start then passes `--download` (until a server is running). Nothing is downloaded otherwise.
+    missing: Option<serde_json::Value>,
+    download: bool,
     told: String,
     status: JsValue,
     pub editors: HashMap<u32, Ed>,
@@ -159,6 +163,8 @@ pub fn start(plugin: JsValue, obs: JsValue, require: Function, module: JsValue, 
         child: None,
         gpu_mode: "ask".into(),
         shortage: None,
+        missing: None,
+        download: false,
         told: String::new(),
         status: JsValue::UNDEFINED,
         editors: HashMap::new(),
@@ -530,7 +536,7 @@ const UI: &[Row] = &[
     ("useGpu", "Use the GPU", "CUDA (NVIDIA) or Metal (Apple) when the server's build supports it and the GPU has room for the models; otherwise, or off, the CPU (slower). Takes effect when the server next starts.", Ctl::Toggle),
     ("gpuLimit", "GPU load limit", "The most of the time the GPU may work for Augmented View, in percent: lower means less heat, fan and coil noise, and results more slowly. Takes effect when the server next starts.", Ctl::Slider(10.0, 100.0, 10.0)),
     ("warnPercent", "Warn at", "Warn when the GPU's load or memory, or the computer's memory, reaches this percent (all programs together).", Ctl::Slider(50.0, 100.0, 5.0)),
-    ("model", "Model", "A BERT-type embedding model on Hugging Face (downloaded once if not in the local Hugging Face cache). Takes effect when the server next starts.", Ctl::Text),
+    ("model", "Model", "A BERT-type embedding model on Hugging Face. If it is not on this computer yet, the server asks before downloading it, with its size. Takes effect when the server next starts.", Ctl::Text),
     ("port", "Port", "", Ctl::Number),
     ("", "This device", "", Ctl::Head),
     ("local.server", "Server", "The server's executable for this computer. Empty: augmented-view-server in the plugin's folder. Kept on this device only.", Ctl::Text),
@@ -1039,6 +1045,7 @@ impl App {
     // ----- the server
 
     fn running(&mut self, i: Info) {
+        self.download = false; // the agreement covered that download; a later model change asks again
         (self.model, self.claims_model, self.has_claims) = (i.model, i.claims_model, i.claims);
         (self.device, self.cuda, self.notes) = (i.devices, i.cuda, i.notes);
         let detail = if i.claims { format!("{} + {}", self.model, self.claims_model) } else { format!("{}, no sentence colours", self.model) };
@@ -1238,8 +1245,16 @@ impl App {
             args.extend(["--gpu".into(), std::mem::replace(&mut self.gpu_mode, "ask".into())]);
         }
         self.shortage = None;
+        self.missing = None;
         if !s.points && !s.contrast {
             args.push("--no-claims".into()); // spares the instruct model's memory
+        }
+        // GLiNER2 is checked for (and, with the user's agreement, downloaded) only when a code has phrase colours
+        if s.colour_codes.iter().any(|c| !crate::colours::model_phrases(c).is_empty()) {
+            args.push("--phrases".into());
+        }
+        if self.download {
+            args.push("--download".into());
         }
         let cp = self.require.call1(&JsValue::NULL, &"child_process".into()).unwrap_or_default();
         let stdio: Array = ["ignore", "pipe", "pipe"].iter().map(|s| JsValue::from(*s)).collect();
@@ -1259,6 +1274,9 @@ impl App {
                     if get(&m, "gpu_shortage").is_truthy() {
                         let v: serde_json::Value = serde_json::from_str(&line).unwrap_or_default();
                         with(|a| a.shortage = Some(v["gpu_shortage"].clone()));
+                    } else if get(&m, "missing").is_truthy() {
+                        let v: serde_json::Value = serde_json::from_str(&line).unwrap_or_default();
+                        with(|a| a.missing = Some(v));
                     } else if get(&m, "ready").is_truthy() {
                         with(|a| a.running(info(&m)));
                     } else if get(&m, "stopping").is_truthy() {
@@ -1266,7 +1284,7 @@ impl App {
                     } else if let Some(p) = get(&m, "progress").as_string() {
                         with(|a| {
                             if !a.detail.starts_with("downloading") {
-                                a.notice("downloading the models this computer lacks (once; a few GB). Emphasis starts when they are in.", 10_000.0);
+                                a.notice("downloading the models you agreed to (once). Emphasis starts when they are in; the status bar shows the progress.", 10_000.0);
                             }
                             a.set_state(State::Starting, &p);
                         });
@@ -1295,6 +1313,11 @@ impl App {
                 if let (Some(3.0), Some(short)) = (code, a.shortage.take()) {
                     a.set_state(State::Stopped, "not enough GPU memory");
                     js::spawn(gpu_choice(short));
+                    return;
+                }
+                if let (Some(4.0), Some(missing)) = (code, a.missing.take()) {
+                    a.set_state(State::Stopped, "");
+                    js::spawn(download_choice(missing));
                     return;
                 }
                 match a.state {
@@ -1378,6 +1401,42 @@ fn shortage_of(v: &serde_json::Value) -> obsidian_kit::gpu::Shortage {
     }
 }
 
+/// A download size for people: "16 MB", "8.1 GB", or "size unknown" (a model set by hand).
+fn size_text(mb: u64) -> String {
+    match mb {
+        0 => "size unknown".into(),
+        1..=999 => format!("{mb} MB"),
+        _ => format!("{:.1} GB", mb as f64 / 1000.0),
+    }
+}
+
+/// The dialog's text for the server's `missing` line: each file with its source and size, the total and the folder.
+fn download_message(m: &serde_json::Value) -> String {
+    let items: Vec<String> = m["missing"].as_array().into_iter().flatten()
+        .map(|i| format!("• {}: {}, from {}", i["what"].as_str().unwrap_or("?"), size_text(i["mb"].as_u64().unwrap_or(0)), i["from"].as_str().unwrap_or("?")))
+        .collect();
+    format!(
+        "The server needs these model files, which this computer does not have yet:\n\n{}\n\nAbout {} in all, downloaded once into {} (a folder outside the vault). Nothing is downloaded unless you choose Download; the models then run on this computer and your notes are never sent anywhere.",
+        items.join("\n\n"),
+        size_text(m["total_mb"].as_u64().unwrap_or(0)),
+        m["folder"].as_str().unwrap_or("the server's cache folder"),
+    )
+}
+
+/// The server stopped before loading because model files are missing: the user decides whether to download them, having
+/// seen what, from where and how large. Yes starts the server again with `--download`; no leaves it stopped.
+async fn download_choice(missing: serde_json::Value) {
+    let Some((obs, app)) = with(|a| (a.obs.clone(), get(&a.plugin, "app"))) else { return };
+    if js::ask(&obs, &app, "Download the models?", &download_message(&missing), "Download", "Not now").await {
+        with(|a| {
+            a.download = true;
+            a.spawn_server(0);
+        });
+    } else {
+        with(|a| a.set_state(State::Stopped, "the models are not downloaded (start the server again to be asked)"));
+    }
+}
+
 /// The server stopped before loading: the GPU has too little free memory. The user chooses, asked as every plugin of the
 /// workspace asks (obsidian_kit::gpu): free the memory the user's other GPU services hold, use the CPU, or leave it
 /// stopped.
@@ -1390,5 +1449,28 @@ async fn gpu_choice(short: serde_json::Value) {
             a.gpu_mode = m.into();
             a.spawn_server(0);
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_download_dialog_names_each_file_its_source_and_size() {
+        let m = serde_json::json!({
+            "missing": [
+                { "what": "parser", "from": "lindat.mff.cuni.cz", "mb": 16 },
+                { "what": "language model", "from": "huggingface.co", "mb": 8070 },
+                { "what": "a model set by hand", "from": "huggingface.co", "mb": 0 }
+            ],
+            "total_mb": 8086,
+            "folder": "/cache/augmented-view"
+        });
+        let text = download_message(&m);
+        assert!(text.contains("parser: 16 MB, from lindat.mff.cuni.cz"));
+        assert!(text.contains("language model: 8.1 GB, from huggingface.co"));
+        assert!(text.contains("size unknown"));
+        assert!(text.contains("About 8.1 GB in all") && text.contains("/cache/augmented-view"));
     }
 }

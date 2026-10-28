@@ -2,10 +2,12 @@
 //! (<https://huggingface.co/docs/huggingface_hub/guides/manage-cache>), else from the server's cache folder, downloaded
 //! into it first (from the Hub's `resolve` URLs, <https://huggingface.co/docs/hub/models-downloading>). The hf-hub crate
 //! does this too, but brings a second HTTP client; this uses udpipe-rs's (ureq) with the operating system's certificate
-//! store. Progress goes to stdout as `{"progress": ...}` lines, which the plugin shows.
+//! store. Progress goes to stdout as `{"progress": ...}` lines, which the plugin shows. Nothing is downloaded unless the
+//! server was started with `--download` (the user's choice in the plugin, with the sizes shown first).
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
 use candle_core::{Error, Result};
@@ -13,6 +15,24 @@ use serde_json::json;
 
 /// The server's cache folder (set once at start-up).
 pub static CACHE: OnceLock<PathBuf> = OnceLock::new();
+
+/// Whether this run may download the model files it lacks. Only when the user chose to: the plugin's *Download the
+/// models* dialog starts the server with `--download`. Without it a missing file is an error that names it, and nothing
+/// is fetched.
+pub static DOWNLOAD: AtomicBool = AtomicBool::new(false);
+
+/// The start of the error for a model file that is not on disk and may not be downloaded in this run.
+pub const MISSING: &str = "not downloaded:";
+
+/// A model file already on disk (the local Hugging Face cache or the server's own folder), never downloaded.
+pub fn local(repo: &str, file: &str) -> Option<PathBuf> {
+    hf_cache(repo, file).or_else(|| Some(ours(repo, file)).filter(|p| p.exists()))
+}
+
+/// Whether a model file is on disk already.
+pub fn have(repo: &str, file: &str) -> bool {
+    local(repo, file).is_some()
+}
 
 /// The default cache folder: the operating system's per-user cache (Windows `%LOCALAPPDATA%`, macOS `~/Library/Caches`,
 /// elsewhere `$XDG_CACHE_HOME` or `~/.cache`, <https://specifications.freedesktop.org/basedir-spec/latest/>).
@@ -44,13 +64,16 @@ pub fn ours(repo: &str, file: &str) -> PathBuf {
     CACHE.get().cloned().unwrap_or_else(default_cache).join("models").join(repo.replace('/', "--")).join(file)
 }
 
-/// A model file, downloaded first when neither cache has it.
+/// A model file, downloaded first when neither cache has it and this run may download (`DOWNLOAD`).
 pub fn need(repo: &str, file: &str) -> Result<PathBuf> {
     if let Some(p) = hf_cache(repo, file) {
         return Ok(p);
     }
     let p = ours(repo, file);
     if !p.exists() {
+        if !DOWNLOAD.load(Ordering::Relaxed) {
+            return Err(Error::Msg(format!("{MISSING} {repo} {file}")));
+        }
         download(&format!("https://huggingface.co/{repo}/resolve/main/{file}"), &p, &format!("{repo} {file}"))?;
     }
     Ok(p)

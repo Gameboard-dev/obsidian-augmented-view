@@ -11,18 +11,50 @@ The colours come from a **colour code**, a list of colours you can edit, each wi
    - Windows with an NVIDIA GPU: `augmented-view-server.exe` (CUDA; falls back to the CPU by itself when CUDA is missing);
    - Windows without one: `augmented-view-server-cpu.exe`, as `augmented-view-server.exe` or as the *CPU server* setting;
    - macOS and Linux: build it from `server/` (Build and deploy, below); these builds are written for but not yet tested.
-   The plugin does not download or update the server itself.
-3. Click the status bar's "AugView" item and choose *Start the server*. The first start downloads the models (about 3 GB, once).
+   Save it as `augmented-view-server.exe` (the release names it `augmented-view-server-windows-x64.exe`; its `.sha256` file lets you check it), or keep the name and set the *Server* setting to it. Keep the two licence files of the release (`augmented-view-server-LICENSE.txt`, `augmented-view-server-THIRD-PARTY-LICENSES.txt`) with it.
+   The plugin does not download, install or update the server itself.
+3. Click the status bar's "AugView" item and choose *Start the server*. On the first start a dialog lists the model files the server needs, where each comes from and its size, and downloads them only if you choose **Download** (about 8.5 GB downloaded once, about 2.9 GB kept on disk; 0.85 GB more for phrase colours).
 4. Open a note, choose a colour code in the floating key, and read.
 
 Desktop only (the server is a separate program). About 4 GB of GPU memory (or 5 GB of the computer's memory on the CPU, where it is much slower) while the server runs; it stops by itself after 30 idle minutes.
 
-## Network use, files outside the vault, privacy
+## Disclosures and compliance
 
-- **Network use.** The plugin talks only to its own server on this computer (`http://127.0.0.1:8790`), or to a server address you set. The server downloads its models once, on first start, from Hugging Face (BAAI/bge-base-en-v1.5, Qwen/Qwen3-4B-Instruct-2507, and, for a code with phrase colours, fastino/gliner2-base-v1) and the UDPipe English parser from LINDAT (<https://hdl.handle.net/11234/1-3131>); after that it needs no network. Your notes never leave your computer.
-- **Files outside the vault.** The plugin starts the server program you downloaded (a child process) and reads its status; the server keeps its models in your user cache folder (Windows `%LOCALAPPDATA%\augmented-view`, macOS `~/Library/Caches/augmented-view`, Linux `~/.cache/augmented-view`) and reads models already in the Hugging Face cache.
-- **No telemetry, no accounts, no payment.**
-- **Licences of what the server downloads:** the UDPipe English model is CC BY-NC-SA 4.0 (personal and non-commercial use); the models are Apache-2.0 (Qwen, GLiNER2) and MIT (bge).
+Augmented View is written to meet Obsidian's [Developer policies](https://docs.obsidian.md/Developer+policies), the [Submission requirements for plugins](https://docs.obsidian.md/Plugins/Releasing/Submission+requirements+for+plugins) and the [Plugin guidelines](https://docs.obsidian.md/Plugins/Releasing/Plugin+guidelines). The disclosures the policies ask for, in their order:
+
+- **Payment:** none. The plugin, the server and the models are free.
+- **Account:** none. No sign-in, no API key.
+- **Network use:**
+  - *The plugin* connects only to its model server on this computer, `http://127.0.0.1:8790` (the port is a setting), to send the paragraphs on screen and receive their colours. On a device where you set *Server address*, it connects to that address instead, and to nothing else. It makes no other network requests.
+  - *The server* connects to the internet only to download model files, and only after you have agreed in the plugin's *Download the models?* dialog, which lists each file, its source and its size. The sources: Hugging Face (`huggingface.co`) for BAAI/bge-base-en-v1.5 (key terms, 0.44 GB), Qwen/Qwen3-4B-Instruct-2507 (sentence colours, 8.1 GB, converted once to a 2.4 GB 4-bit file) and, if a colour code has phrase colours, fastino/gliner2-base-v1 (0.85 GB); LINDAT (`lindat.mff.cuni.cz`) for the UDPipe English parser model (16 MB). These are needed because the colours come from these models, which are too large to ship with the plugin. Once they are on disk the server needs no network.
+  - *On this computer only*, when the GPU has too little free memory and you choose to free it, the server asks your other local model servers that use the same mechanism (on `127.0.0.1`) to release their GPU memory.
+  - Your notes are never sent off your computer (unless you point *Server address* at another machine yourself).
+- **Files outside the vault:**
+  - *The server program*, which you download and place yourself (by default in the plugin's folder, inside the vault).
+  - *Model files*, in the server's cache folder: Windows `%LOCALAPPDATA%\augmented-view`, macOS `~/Library/Caches/augmented-view`, Linux `$XDG_CACHE_HOME/augmented-view` (by default `~/.cache/augmented-view`). Delete the folder to remove them.
+  - *The Hugging Face cache* (`$HF_HUB_CACHE`, `$HF_HOME/hub` or `~/.cache/huggingface/hub`): read only, so that models you already have are not downloaded again.
+  - *GPU claims*: one small JSON file while the server holds GPU memory (its port, process id and the memory it holds), removed when it stops: Windows `%LOCALAPPDATA%\obsidian-kit\gpu`, Linux and macOS `$XDG_DATA_HOME/obsidian-kit/gpu` (by default `~/.local/share/obsidian-kit/gpu`). It lets the user's GPU services see which of them holds memory.
+  - The plugin itself writes only inside the vault's plugin folder (its settings, its per-note cache, an optional debug log) and Obsidian's local storage (device-only settings). It starts the server as a child process.
+- **Ads:** none.
+- **Telemetry:** none, client-side or server-side. Nothing is collected or sent anywhere; the readings in the status bar (GPU and memory load) stay on your computer.
+- **Source code:** open source, under the MIT licence (`LICENSE`). The plugin and the server are built from the Rust source in this repository and the shared crates and build tool in [obsidian-cargo-lib](https://github.com/Gameboard-dev/obsidian-cargo-lib) (Build and deploy, below).
+
+| Rule | How Augmented View meets it |
+|---|---|
+| No self-install or self-update | The plugin never downloads, installs or updates code. You download the server from the [releases page](https://github.com/Gameboard-dev/obsidian-augmented-view/releases) and put it in place yourself. Model files are data, downloaded by the server only after you choose *Download* in a dialog that shows each file's source and size. |
+| No obfuscation | `main.js` is a short loader; the plugin's code is a WebAssembly module (inlined in `main.js` in a release) compiled from the Rust source here, with its JavaScript bindings generated by wasm-bindgen and kept readable. Build instructions are below. |
+| No client-side telemetry | None. The plugin contacts only its own server. |
+| No ads | None. |
+| Disclosures | Network use and files outside the vault, above. |
+| Licence and attribution | `LICENSE` (MIT). Each server release carries `augmented-view-server-THIRD-PARTY-LICENSES.txt` (the crates' licences and the native code compiled in, generated by `licences/generate.py`); `pack --release` refuses to release the server without it. The models keep their own licences (below). |
+| Desktop only | `isDesktopOnly` is `true`: the plugin starts the server with Node's `child_process`, available only on desktop, and checks for desktop Obsidian before doing so. |
+| Command ids | Without the plugin id (`toggle-server`, `toggle-emphasis`, `more`, `less`); no default hotkeys. |
+| Security | No `innerHTML`, `outerHTML` or `insertAdjacentHTML`; text is set with `textContent` and the DOM API. No `eval`; in a release the bindings are part of `main.js`. The worker runs the same bundled bindings from a Blob URL, never code from elsewhere. |
+| Settings | Headings with `setHeading`, in sentence case, without the word "settings". |
+| Resources | On unload the plugin stops its worker, its requests and a server it started, and removes its stylesheet and floating key; it never detaches leaves. |
+| `this.app` | The plugin uses the plugin's own `app`, never the global one. |
+
+**Licences of the models** (not distributed with the plugin or the server; downloaded with your agreement): BAAI/bge-base-en-v1.5 MIT; Qwen/Qwen3-4B-Instruct-2507 Apache-2.0; fastino/gliner2-base-v1 Apache-2.0; the UDPipe 2.5 English EWT model CC BY-NC-SA 4.0 (personal and non-commercial use only).
 
 ## What it marks
 
@@ -158,14 +190,14 @@ The slider is applied in the worker to the ranked results it holds, so moving it
 
 A native Rust program: candle for the models (<https://github.com/huggingface/candle>), Hugging Face's tokenizers, udpipe-rs for the parse, axum for HTTP. The plugin starts it, stops it and adopts one already running on its port.
 
-- **Models**: BAAI/bge-base-en-v1.5, Qwen/Qwen3-4B-Instruct-2507 and, for a code with phrase colours, fastino/gliner2-base-v1 (Apache-2.0; 0.8 GB, on the CPU, loaded on first use), read from the local Hugging Face cache when there, else downloaded once from Hugging Face into the server's cache folder (Windows `%LOCALAPPDATA%\augmented-view`, macOS `~/Library/Caches/augmented-view`, Linux `~/.cache/augmented-view`). Qwen publishes no GGUF for this model and candle reads quantized weights only from GGUF, so the server quantizes the official weights once (Q4K, the tied embedding Q6K) into a 2.4 GB file there (about two minutes) and deletes the 8 GB of official weights it downloaded for it. While downloading, the status bar says "downloading" and its tooltip shows the progress.
-- **Parser**: UDPipe 1 with the Universal Dependencies 2.5 English EWT model (`english-ewt-ud-2.5-191206.udpipe`, 16 MB, MD5 4284eb5c16348e716d739b8ecec7de6d), downloaded into the same folder from LINDAT (<https://hdl.handle.net/11234/1-3131>). The model's licence is CC BY-NC-SA 4.0: personal and non-commercial use.
-- **Offline**: after the first start has downloaded the models, the server needs no network at all, and the plugin talks only to the server.
+- **Models**: BAAI/bge-base-en-v1.5, Qwen/Qwen3-4B-Instruct-2507 and, for a code with phrase colours, fastino/gliner2-base-v1 (Apache-2.0; 0.8 GB, on the CPU, loaded on first use), read from the local Hugging Face cache when there, else downloaded once from Hugging Face into the server's cache folder (Disclosures and compliance, above), only when the user has agreed: without `--download` the server prints a `missing` line (each file, its source and size) and exits with code 4, and the plugin asks. Qwen publishes no GGUF for this model and candle reads quantized weights only from GGUF, so the server quantizes the official weights once (Q4K, the tied embedding Q6K) into a 2.4 GB file there (about two minutes) and deletes the 8 GB of official weights it downloaded for it. While downloading, the status bar says "downloading" and its tooltip shows the progress.
+- **Parser**: UDPipe 1 with the Universal Dependencies 2.5 English EWT model (`english-ewt-ud-2.5-191206.udpipe`, 16 MB, MD5 4284eb5c16348e716d739b8ecec7de6d), downloaded into the same folder from LINDAT (<https://hdl.handle.net/11234/1-3131>), with the models and on the same agreement. The model's licence is CC BY-NC-SA 4.0: personal and non-commercial use.
+- **Offline**: once the models are on disk, the server needs no network at all, and the plugin talks only to the server.
 - **Precision**: the embedding model runs in float32 (TF32 matrix products on CUDA). candle's BERT builds its attention mask with `f32::MIN`, which is −∞ in fp16 and bf16 and gives NaN.
 - **Origins**: the server answers Obsidian's own origins (desktop, iOS, Android); `--origin` adds others.
 - **Against the Python server it replaced** (8 paragraphs): the same main point in 5 of 8, overlap of the top terms 0.61, phrases 0.48, points 0.42; most differences come from UDPipe's parse, which is less accurate than spaCy's.
 
-A device that cannot start the server (a browser, a phone, or a sandbox such as Ignis) uses one running elsewhere: set *Server address* on that device (for Ignis: `http://127.0.0.1:18790`, the relay in `ignis/SETUP.md`, and *Paragraphs per request* 16). With an address set the plugin never starts or stops a server there.
+A device that cannot start the server (a browser, a phone, or a sandbox such as Ignis) uses one running elsewhere: set *Server address* on that device (for Ignis: the address of a relay to the computer's server, and *Paragraphs per request* 16). With an address set the plugin never starts or stops a server there.
 
 ## Colours
 
@@ -218,4 +250,4 @@ Left out as Rust cannot run them yet: Qwen3.5-4B and 9B (February 2026; their li
 
 ## Licence
 
-MIT (`LICENSE`). `server/data/wordfreq-en.txt` is derived from wordfreq's English word list (Robyn Speer, <https://github.com/rspeer/wordfreq>) and is under CC BY-SA 4.0. The models the server downloads keep their own licences (Server, above).
+MIT (`LICENSE`). The third-party licences of the plugin's and the server's crates, and of the native code compiled into the server, are in `licences/` (`plugin.txt`, `server.txt`; regenerate them with `python licences/generate.py` and cargo-about after a dependency changes). `server/data/wordfreq-en.txt` is derived from wordfreq's English word list (Robyn Speer, <https://github.com/rspeer/wordfreq>) and is under CC BY-SA 4.0. The models the server downloads keep their own licences (Server, above).
