@@ -27,7 +27,7 @@ Download the server for your computer from the same
 | Computer | File |
 |---|---|
 | Windows with an NVIDIA GPU | `augmented-view-server-windows-x64.exe` (CUDA; falls back to the CPU by itself when CUDA is missing) |
-| Windows without one | the CPU build, `augmented-view-server-cpu.exe` |
+| Windows without one | the CPU build, `augmented-view-server-cpu-windows-x64.exe` |
 | macOS and Linux | build it from `server/` ([Building from source](building.md#the-server)); these builds are written for but not yet tested |
 
 Save it in the plugin's folder as `augmented-view-server.exe` (the CPU build as `augmented-view-server-cpu.exe`), or
