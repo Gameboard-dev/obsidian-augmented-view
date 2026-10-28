@@ -29,11 +29,10 @@ rayon = "1" # already built for candle
 stop-words = { version = "0.10", default-features = false, features = ["nltk"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# Downloads (models the machine lacks): udpipe-rs's HTTP client already, with the operating system's certificate store
-# (<https://docs.rs/ureq/latest/ureq/tls/enum.RootCerts.html>), so it works behind antivirus or company TLS inspection.
-ureq = { version = "3", features = ["platform-verifier"] }
-# The hardware: device choice with reasons, NVML/sysinfo readings, GPU pacing (shared with Quarry's service).
-native-kit = { path = "../../native-kit", features = ["candle"] }
+# The hardware: device choice with reasons, NVML/sysinfo readings, GPU pacing (shared with Quarry's service); with
+# `download`, the resumed, checksummed downloads of the download command the user runs (`--download all`), over
+# udpipe-rs's HTTP client (ureq) with the operating system's certificate store.
+native-kit = { path = "../../native-kit", features = ["candle", "download"] }
 # GLiNER2 for the phrase colours (phrases.rs), on candle 0.10 and the CPU (it makes its inputs on the CPU).
 gliner2 = "0.1.3"
 

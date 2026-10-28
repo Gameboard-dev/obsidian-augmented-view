@@ -243,7 +243,7 @@ impl Claims {
         if !phrases.is_empty() {
             let model = self.phrases.get_or_insert_with(|| crate::phrases::Phrases::load().map_err(|e| {
                 if e.contains(crate::models::MISSING) {
-                    hw::note(format!("phrase colours: {} (about 0.85 GB) is not downloaded; stop and start the server to be asked to download it", crate::phrases::REPO));
+                    hw::note(format!("phrase colours: {} (about 0.84 GB) is not downloaded: stop the server and start it again, and Settings → Augmented View → Models shows the command that downloads it", crate::phrases::REPO));
                 } else {
                     hw::note(format!("phrase colours: GLiNER2 could not load: {e}"));
                 }

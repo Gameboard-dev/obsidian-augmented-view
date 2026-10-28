@@ -195,3 +195,31 @@
 
 /* the key's own controls follow its scale too */
 .av-key .av-key-code, .av-key .av-key-title, .av-key .av-key-name, .av-key .av-key-line, .av-key .av-key-folder { font-size: inherit; }
+
+/* Settings → Models (models.rs): the heading's empty anchor row, each model's status, the command to copy. */
+.av-models-anchor {
+  display: none;
+}
+
+.av-model-ready {
+  color: var(--text-success);
+  font-weight: var(--font-semibold);
+}
+
+.av-model-missing {
+  color: var(--text-error);
+  font-weight: var(--font-semibold);
+}
+
+.av-models-command code {
+  display: block;
+  margin-top: 0.4em;
+  user-select: all;
+  word-break: break-all;
+}
+
+/* The button in the notice that says which models are missing. */
+.av-notice-button {
+  display: block;
+  margin-top: 0.5em;
+}

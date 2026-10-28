@@ -69,10 +69,9 @@ pub struct App {
     /// shortage the last one reported (native_kit::hw::claims, through its `gpu_shortage` line).
     gpu_mode: String,
     shortage: Option<serde_json::Value>,
-    /// The model files the last server lacked (its `missing` line, exit 4), and whether the user agreed to download
-    /// them: the next start then passes `--download` (until a server is running). Nothing is downloaded otherwise.
+    /// The models the last server lacked (its `missing` line, followed by exit 4): the plugin then says which and shows
+    /// the Models section (models.rs). It never downloads them, nor starts the server's download.
     missing: Option<serde_json::Value>,
-    download: bool,
     told: String,
     status: JsValue,
     pub editors: HashMap<u32, Ed>,
@@ -164,7 +163,6 @@ pub fn start(plugin: JsValue, obs: JsValue, require: Function, module: JsValue, 
         gpu_mode: "ask".into(),
         shortage: None,
         missing: None,
-        download: false,
         told: String::new(),
         status: JsValue::UNDEFINED,
         editors: HashMap::new(),
@@ -455,7 +453,7 @@ pub async fn check() {
     }
 }
 
-async fn start_server() {
+pub(crate) async fn start_server() {
     let Some(Some(base)) = with(|a| (!matches!(a.state, State::Starting | State::Running)).then(|| a.base())) else { return };
     match health(base).await {
         Some(i) => _ = with(|a| a.running(i)),
@@ -536,8 +534,10 @@ const UI: &[Row] = &[
     ("useGpu", "Use the GPU", "CUDA (NVIDIA) or Metal (Apple) when the server's build supports it and the GPU has room for the models; otherwise, or off, the CPU (slower). Takes effect when the server next starts.", Ctl::Toggle),
     ("gpuLimit", "GPU load limit", "The most of the time the GPU may work for Augmented View, in percent: lower means less heat, fan and coil noise, and results more slowly. Takes effect when the server next starts.", Ctl::Slider(10.0, 100.0, 10.0)),
     ("warnPercent", "Warn at", "Warn when the GPU's load or memory, or the computer's memory, reaches this percent (all programs together).", Ctl::Slider(50.0, 100.0, 5.0)),
-    ("model", "Model", "A BERT-type embedding model on Hugging Face. If it is not on this computer yet, the server asks before downloading it, with its size. Takes effect when the server next starts.", Ctl::Text),
+    ("model", "Model", "A BERT-type embedding model on Hugging Face. If it is not on this computer yet, the server does not start, and Models (below) shows the command that downloads it. Takes effect when the server next starts.", Ctl::Text),
     ("port", "Port", "", Ctl::Number),
+    ("", "Models", "", Ctl::Head),
+    ("", "", "", Ctl::Custom(crate::models::mark)),
     ("", "This device", "", Ctl::Head),
     ("local.server", "Server", "The server's executable for this computer. Empty: augmented-view-server in the plugin's folder. Kept on this device only.", Ctl::Text),
     ("local.cpuServer", "CPU server", "A CPU-only build, started when the server above cannot start at all (a CUDA build where CUDA's libraries are missing). Empty: augmented-view-server-cpu in the plugin's folder, if there. Kept on this device only.", Ctl::Text),
@@ -564,7 +564,7 @@ const RELEASES: &str = "https://github.com/Gameboard-dev/obsidian-augmented-view
 impl App {
     /// Whether this device uses a server elsewhere (its Server address, or in Ignis the relay), rather than this
     /// computer's own.
-    fn remote(&self) -> bool {
+    pub(crate) fn remote(&self) -> bool {
         !self.local.server_url.trim().is_empty() || self.relayed()
     }
 
@@ -574,7 +574,7 @@ impl App {
         self.local.server_url.trim().is_empty() && js::in_ignis()
     }
 
-    fn base(&self) -> String {
+    pub(crate) fn base(&self) -> String {
         if self.relayed() {
             return format!("{}/relay/augmented-view", str(&get(&get(&js::global(), "location"), "origin")));
         }
@@ -849,10 +849,26 @@ impl App {
         }));
     }
 
-    /// The settings tab, from the rows above (obsidian_kit::settings), then the colour codes.
+    /// The settings tab, from the rows above (obsidian_kit::settings), the Models section after its heading, then the
+    /// colour codes.
     fn display(&self, tab: &JsValue) {
         obsidian_kit::settings::render(tab, &self.obs, UI, |k| self.field(k), |k, v| _ = with(|a| a.set_field(k, v))); // called inside with(): read self, not the App again
+        crate::models::section(self);
         self.colour_settings(tab);
+    }
+
+    /// Whether this device may start the server (desktop Obsidian outside a sandbox).
+    pub(crate) fn can_spawn(&self) -> bool {
+        self.can_spawn
+    }
+
+    pub(crate) fn is_running(&self) -> bool {
+        self.state == State::Running
+    }
+
+    /// Whether a colour code has phrase colours, so the server needs GLiNER2 too.
+    pub(crate) fn phrases(&self) -> bool {
+        self.settings.colour_codes.iter().any(|c| !crate::colours::model_phrases(c).is_empty())
     }
 
     /// Each colour code: its name, a row per colour (name, colour, how it marks, opacity, dark-theme colour, what it
@@ -1045,7 +1061,10 @@ impl App {
     // ----- the server
 
     fn running(&mut self, i: Info) {
-        self.download = false; // the agreement covered that download; a later model change asks again
+        if crate::models::was_missing() {
+            crate::models::clear(); // the models are in now: the Models section says so
+            redraw_settings();
+        }
         (self.model, self.claims_model, self.has_claims) = (i.model, i.claims_model, i.claims);
         (self.device, self.cuda, self.notes) = (i.devices, i.cuda, i.notes);
         let detail = if i.claims { format!("{} + {}", self.model, self.claims_model) } else { format!("{}, no sentence colours", self.model) };
@@ -1109,7 +1128,6 @@ impl App {
         let label = match self.state {
             State::Running if s.enabled => format!("{:.0}% \u{b7} {}{warn}", s.sensitivity * 100.0, self.on()),
             State::Running => format!("hidden{warn}"),
-            State::Starting if self.detail.starts_with("downloading") => "downloading".into(),
             st => format!("{st:?}").to_lowercase(),
         };
         call!(self.status, setText, format!("AugView {label}"));
@@ -1202,7 +1220,7 @@ impl App {
     }
 
     /// This computer's server executable (`cpu`: the CPU-only build): the setting, else the file in the plugin's folder.
-    fn server_path(&self, cpu: bool) -> String {
+    pub(crate) fn server_path(&self, cpu: bool) -> String {
         let set = if cpu { &self.local.cpu_server } else { &self.local.server };
         if !set.is_empty() {
             return set.clone();
@@ -1236,26 +1254,10 @@ impl App {
             let why = format!("no server at {path}: download the server for this computer from {RELEASES} and put it there, or set its path (Settings, Server)");
             return self.fall_back(attempt, why);
         }
-        let s = &self.settings;
-        let mut args = vec!["--port".to_string(), s.port.to_string(), "--model".into(), s.model.clone(), "--idle-minutes".into(), s.idle_minutes.to_string()];
-        args.extend(["--gpu-limit".into(), s.gpu_limit.to_string()]);
-        if !s.use_gpu {
-            args.extend(["--device".into(), "cpu".into()]);
-        } else {
-            args.extend(["--gpu".into(), std::mem::replace(&mut self.gpu_mode, "ask".into())]);
-        }
+        let gpu_mode = std::mem::replace(&mut self.gpu_mode, "ask".into());
+        let args = server_args(&self.settings, gpu_mode);
         self.shortage = None;
         self.missing = None;
-        if !s.points && !s.contrast {
-            args.push("--no-claims".into()); // spares the instruct model's memory
-        }
-        // GLiNER2 is checked for (and, with the user's agreement, downloaded) only when a code has phrase colours
-        if s.colour_codes.iter().any(|c| !crate::colours::model_phrases(c).is_empty()) {
-            args.push("--phrases".into());
-        }
-        if self.download {
-            args.push("--download".into());
-        }
         let cp = self.require.call1(&JsValue::NULL, &"child_process".into()).unwrap_or_default();
         let stdio: Array = ["ignore", "pipe", "pipe"].iter().map(|s| JsValue::from(*s)).collect();
         let child = call!(cp, spawn, path.clone(), args.into_iter().map(JsValue::from).collect::<Array>(), obj! { windowsHide: true, stdio: stdio });
@@ -1281,13 +1283,6 @@ impl App {
                         with(|a| a.running(info(&m)));
                     } else if get(&m, "stopping").is_truthy() {
                         with(|a| a.set_state(State::Stopping, &str(&get(&m, "stopping"))));
-                    } else if let Some(p) = get(&m, "progress").as_string() {
-                        with(|a| {
-                            if !a.detail.starts_with("downloading") {
-                                a.notice("downloading the models you agreed to (once). Emphasis starts when they are in; the status bar shows the progress.", 10_000.0);
-                            }
-                            a.set_state(State::Starting, &p);
-                        });
                     }
                 }
             }
@@ -1316,8 +1311,13 @@ impl App {
                     return;
                 }
                 if let (Some(4.0), Some(missing)) = (code, a.missing.take()) {
-                    a.set_state(State::Stopped, "");
-                    js::spawn(download_choice(missing));
+                    // the models are not downloaded yet: the server did not start. The plugin says which and shows the
+                    // Models section, with the command the user runs; it never downloads them itself
+                    a.state = State::Stopped;
+                    a.detail = "the models are not downloaded yet (Settings \u{2192} Models)".into();
+                    a.server_changed();
+                    a.log("server Stopped: models not downloaded yet (exit 4)");
+                    js::timeout(0.0, move || crate::models::on_exit_missing(missing));
                     return;
                 }
                 match a.state {
@@ -1401,40 +1401,29 @@ fn shortage_of(v: &serde_json::Value) -> obsidian_kit::gpu::Shortage {
     }
 }
 
-/// A download size for people: "16 MB", "8.1 GB", or "size unknown" (a model set by hand).
-fn size_text(mb: u64) -> String {
-    match mb {
-        0 => "size unknown".into(),
-        1..=999 => format!("{mb} MB"),
-        _ => format!("{:.1} GB", mb as f64 / 1000.0),
-    }
+/// The settings tab drawn again (after this call returns: it reads the App).
+pub(crate) fn redraw_settings() {
+    js::timeout(0.0, || _ = with(|a| a.display(&a.tab.clone())));
 }
 
-/// The dialog's text for the server's `missing` line: each file with its source and size, the total and the folder.
-fn download_message(m: &serde_json::Value) -> String {
-    let items: Vec<String> = m["missing"].as_array().into_iter().flatten()
-        .map(|i| format!("• {}: {}, from {}", i["what"].as_str().unwrap_or("?"), size_text(i["mb"].as_u64().unwrap_or(0)), i["from"].as_str().unwrap_or("?")))
-        .collect();
-    format!(
-        "The server needs these model files, which this computer does not have yet:\n\n{}\n\nAbout {} in all, downloaded once into {} (a folder outside the vault). Nothing is downloaded unless you choose Download; the models then run on this computer and your notes are never sent anywhere.",
-        items.join("\n\n"),
-        size_text(m["total_mb"].as_u64().unwrap_or(0)),
-        m["folder"].as_str().unwrap_or("the server's cache folder"),
-    )
-}
-
-/// The server stopped before loading because model files are missing: the user decides whether to download them, having
-/// seen what, from where and how large. Yes starts the server again with `--download`; no leaves it stopped.
-async fn download_choice(missing: serde_json::Value) {
-    let Some((obs, app)) = with(|a| (a.obs.clone(), get(&a.plugin, "app"))) else { return };
-    if js::ask(&obs, &app, "Download the models?", &download_message(&missing), "Download", "Not now").await {
-        with(|a| {
-            a.download = true;
-            a.spawn_server(0);
-        });
+/// The server's arguments for a start to serve: never `--download`. The plugin starts no other program, so it never
+/// starts a download (models.rs; Obsidian's developer policies). `gpu_mode`: what to do when the GPU has no room.
+pub(crate) fn server_args(s: &Settings, gpu_mode: String) -> Vec<String> {
+    let mut args = vec!["--port".to_string(), s.port.to_string(), "--model".into(), s.model.clone(), "--idle-minutes".into(), s.idle_minutes.to_string()];
+    args.extend(["--gpu-limit".into(), s.gpu_limit.to_string()]);
+    if !s.use_gpu {
+        args.extend(["--device".into(), "cpu".into()]);
     } else {
-        with(|a| a.set_state(State::Stopped, "the models are not downloaded (start the server again to be asked)"));
+        args.extend(["--gpu".into(), gpu_mode]);
     }
+    if !s.points && !s.contrast {
+        args.push("--no-claims".into()); // spares the instruct model's memory
+    }
+    // GLiNER2 is checked for only when a code has phrase colours
+    if s.colour_codes.iter().any(|c| !crate::colours::model_phrases(c).is_empty()) {
+        args.push("--phrases".into());
+    }
+    args
 }
 
 /// The server stopped before loading: the GPU has too little free memory. The user chooses, asked as every plugin of the
@@ -1456,21 +1445,34 @@ async fn gpu_choice(short: serde_json::Value) {
 mod tests {
     use super::*;
 
+    /// The server's arguments never ask it to download, whatever the settings and the GPU answer.
     #[test]
-    fn the_download_dialog_names_each_file_its_source_and_size() {
-        let m = serde_json::json!({
-            "missing": [
-                { "what": "parser", "from": "lindat.mff.cuni.cz", "mb": 16 },
-                { "what": "language model", "from": "huggingface.co", "mb": 8070 },
-                { "what": "a model set by hand", "from": "huggingface.co", "mb": 0 }
-            ],
-            "total_mb": 8086,
-            "folder": "/cache/augmented-view"
-        });
-        let text = download_message(&m);
-        assert!(text.contains("parser: 16 MB, from lindat.mff.cuni.cz"));
-        assert!(text.contains("language model: 8.1 GB, from huggingface.co"));
-        assert!(text.contains("size unknown"));
-        assert!(text.contains("About 8.1 GB in all") && text.contains("/cache/augmented-view"));
+    fn the_server_is_never_started_with_download() {
+        let mut s = Settings::default();
+        for (gpu, points, phrases, mode) in [(true, true, false, "ask"), (false, false, true, "cpu"), (true, true, true, "free")] {
+            s.use_gpu = gpu;
+            (s.points, s.contrast) = (points, points);
+            if phrases {
+                let mut code = crate::colours::ColourCode::default();
+                code.colours.push(crate::colours::Colour { level: crate::colours::Level::Phrase, kinds: Vec::new(), ..Default::default() });
+                s.colour_codes.push(code);
+            }
+            let args = server_args(&s, mode.into());
+            assert!(!args.iter().any(|a| a.contains("download")), "{args:?}");
+            assert_eq!(args.contains(&"--phrases".to_string()), s.colour_codes.iter().any(|c| !crate::colours::model_phrases(c).is_empty()));
+        }
+    }
+
+    /// The plugin starts programs only in app.rs (Node's child_process, here alone), and nowhere names the server's
+    /// download option except the command it shows to copy (models.rs, which starts nothing).
+    #[test]
+    fn only_the_shown_command_names_download() {
+        let flag = concat!("\"--", "download");
+        let spawns = concat!("child_", "process");
+        for (name, src) in [("app.rs", include_str!("app.rs")), ("models.rs", include_str!("models.rs")), ("lib.rs", include_str!("lib.rs")), ("engine.rs", include_str!("engine.rs")), ("editor.rs", include_str!("editor.rs")), ("view.rs", include_str!("view.rs")), ("key.rs", include_str!("key.rs")), ("reading.rs", include_str!("reading.rs")), ("cache.rs", include_str!("cache.rs"))] {
+            assert!(!src.contains(flag) || name == "models.rs", "{name} names --download");
+            assert!(!src.contains(spawns) || name == "app.rs", "{name} starts a program");
+        }
+        assert!(!include_str!("models.rs").contains(spawns), "the Models section starts nothing");
     }
 }

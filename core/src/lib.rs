@@ -15,6 +15,7 @@ mod colours;
 mod editor;
 mod engine;
 mod key;
+mod models;
 mod msg;
 mod pick;
 mod reading;

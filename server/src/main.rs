@@ -8,15 +8,17 @@
 //!                   "stress": true the contrast words
 //!   GET  /health    {"ready", "protocol", "model", "claims", "claims_model", "device", "devices", "cuda", "notes"}
 //!   GET  /stats     the GPU's and the computer's load and memory, and the server's own (native-kit's hw)
+//!   GET  /models    the models this run uses: each one's purpose, page, licence, folder, files and status (models.rs)
 //!   POST /shutdown  stops the server
 //!
 //! Offsets are UTF-16 code units of the text sent; `v` is a span's visible text (markup blanked, spaces collapsed).
 //! Each layer has its own thread holding its models, so terms never wait behind a whole request for points; their GPU
 //! work takes turns (native-kit's hw). Each model goes on the GPU when there is one with room for it, else on the CPU, and every
 //! such fallback is reported with its reason in `notes`. On start, when model files are missing, the server prints one
-//! line, {"missing": [{"what", "from", "mb"}], "total_mb", "folder"}, and exits with code 4, unless it was started with
-//! --download (the user agreed to the download in the plugin's dialog); then it prints `{"progress": ...}` lines while it
-//! downloads them. Once the models are loaded it prints one line, {"ready": true, ...}; with --idle-minutes N it
+//! line, {"missing": [{"id", "purpose", "name", "page", "licence", "licence_url", "folder", "files", "missing_bytes",
+//! ...}], "total_bytes", "folder", "command"}, and exits with code 4: it never downloads anything when it is started to
+//! serve. `--download <ids|all>` is the download-only run the user starts in a terminal (models.rs), never the plugin.
+//! Once the models are loaded it prints one line, {"ready": true, ...}; with --idle-minutes N it
 //! exits after N minutes without a request, freeing the GPU. Browsers ask before cross-origin POSTs, so OPTIONS is
 //! answered (<https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/CORS#preflighted_requests>), for Obsidian's
 //! origins and any given with --origin. HTTP: axum (<https://docs.rs/axum>).
@@ -54,7 +56,6 @@ const PROTOCOL: u32 = 8; // 2: spans carry "v"; 3: UDPipe's parse; 4: quotations
 /// Obsidian's own origins: desktop, iOS, Android (<https://capacitorjs.com/docs/config>, `server.hostname`).
 const ORIGINS: [&str; 3] = ["app://obsidian.md", "capacitor://localhost", "http://localhost"];
 pub const PARSER: &str = "english-ewt-ud-2.5-191206.udpipe"; // UD 2.5 models, CC BY-NC-SA 4.0 (https://hdl.handle.net/11234/1-3131)
-const PARSER_URL: &str = "https://lindat.mff.cuni.cz/repository/server/api/core/bitstreams/8d51e3d3-1f87-47fe-8975-c197ddf7907b/content";
 /// About how much memory each layer's models take (measured: README, "GPU memory"), on the GPU and on the CPU.
 const TERMS_MB: (u64, u64) = (600, 1200);
 const POINTS_MB: (u64, u64) = (3500, 4000);
@@ -97,6 +98,8 @@ struct App {
     claims: Option<mpsc::Sender<Job>>,
     model: String,
     claims_model: String,
+    /// What this run uses, for GET /models.
+    needs: models::Needs,
     devices: Value, // {"terms": "CUDA, …", "points": "CPU"}
     cuda: bool,
     start: Instant,
@@ -141,13 +144,17 @@ struct Args {
     gpu: String,
     gpu_limit: u32,
     origins: Vec<String>,
-    /// The user chose to download the model files this computer lacks (the plugin's dialog, which showed their sizes).
-    download: bool,
+    /// `--download <ids|all>`: the download-only run, which the user starts in a terminal (models::download_only).
+    download: Option<String>,
     /// The note's colour codes have phrase colours, so GLiNER2 is needed too (checked at start with the others).
     phrases: bool,
 }
 
 fn args() -> Args {
+    parse_args(std::env::args().skip(1))
+}
+
+fn parse_args(args: impl Iterator<Item = String>) -> Args {
     let mut a = Args {
         port: 8790,
         model: "BAAI/bge-base-en-v1.5".into(),
@@ -159,11 +166,17 @@ fn args() -> Args {
         gpu: String::new(),
         gpu_limit: 100,
         origins: ORIGINS.iter().map(|o| o.to_string()).collect(),
-        download: false,
+        download: None,
         phrases: false,
     };
-    let mut it = std::env::args().skip(1);
+    let mut it = args.peekable();
     while let Some(k) = it.next() {
+        if k == "--download" {
+            // its ids are optional: "--download" alone, or followed by another option, is "all"
+            let ids = it.next_if(|n| !n.starts_with("--")).unwrap_or_else(|| "all".into());
+            a.download = Some(ids);
+            continue;
+        }
         let mut v = || it.next().unwrap_or_default();
         match k.as_str() {
             "--port" => a.port = v().parse().unwrap_or(a.port),
@@ -176,7 +189,6 @@ fn args() -> Args {
             "--gpu-limit" => a.gpu_limit = v().parse().unwrap_or(100),
             "--gpu" => a.gpu = v(),
             "--origin" => a.origins.push(v()),
-            "--download" => a.download = true,
             "--phrases" => a.phrases = true,
             _ => eprintln!("unknown argument {k}"),
         }
@@ -287,45 +299,6 @@ fn stream(app: &App, tx: Option<&mpsc::Sender<Job>>, req: Req) -> Response {
     }
 }
 
-/// The default models' download sizes in MB (decimal, from Hugging Face's file listings), for the dialog that asks the
-/// user before anything is downloaded. A model set by hand has no known size (0).
-const SIZES_MB: [(&str, u64); 3] = [("BAAI/bge-base-en-v1.5", 440), ("Qwen/Qwen3-4B-Instruct-2507", 8070), (phrases::REPO, 845)];
-const PARSER_MB: u64 = 16;
-
-fn size_mb(repo: &str) -> u64 {
-    SIZES_MB.iter().find(|(r, _)| *r == repo).map_or(0, |(_, mb)| *mb)
-}
-
-/// What this run needs and does not have on disk, each with where it comes from and its download size: nothing is
-/// downloaded until the user has seen this list and agreed (`--download`).
-fn missing(a: &Args) -> Vec<Value> {
-    let mut out = Vec::new();
-    if !a.cache.join(PARSER).exists() {
-        out.push(json!({ "what": "UDPipe English parser (LINDAT, CC BY-NC-SA 4.0)", "from": "lindat.mff.cuni.cz", "mb": PARSER_MB }));
-    }
-    if ["config.json", "model.safetensors", "tokenizer.json"].iter().any(|f| !models::have(&a.model, f)) {
-        out.push(json!({ "what": format!("{} (key terms)", a.model), "from": "huggingface.co", "mb": size_mb(&a.model) }));
-    }
-    if !a.no_claims {
-        let gguf = a.cache.join(format!("{}-q4k.gguf", a.claims_model.replace('/', "--")));
-        let tokenizer = ["tokenizer.json", "tokenizer_config.json"].iter().all(|f| models::have(&a.claims_model, f));
-        // the official weights already in a cache (the Hugging Face one) are converted without downloading anything
-        let official = models::local(&a.claims_model, "model.safetensors.index.json")
-            .and_then(|p| serde_json::from_str::<Value>(&std::fs::read_to_string(p).ok()?).ok())
-            .is_some_and(|index| index["weight_map"].as_object().into_iter().flatten().all(|(_, f)| f.as_str().is_some_and(|f| models::have(&a.claims_model, f))));
-        if !gguf.exists() && !(official && tokenizer && models::have(&a.claims_model, "config.json")) {
-            let what = format!("{} (sentence colours; converted once to a 2.4 GB 4-bit file, and the download deleted)", a.claims_model);
-            out.push(json!({ "what": what, "from": "huggingface.co", "mb": size_mb(&a.claims_model) }));
-        } else if !tokenizer {
-            out.push(json!({ "what": format!("{} tokenizer", a.claims_model), "from": "huggingface.co", "mb": 12 }));
-        }
-    }
-    if a.phrases && phrases::FILES.iter().any(|f| !models::have(phrases::REPO, f)) {
-        out.push(json!({ "what": format!("{} (phrase colours)", phrases::REPO), "from": "huggingface.co", "mb": size_mb(phrases::REPO) }));
-    }
-    out
-}
-
 /// Stop with a message the plugin shows (its last line of stderr).
 fn fail(msg: String) -> ! {
     eprintln!("{msg}");
@@ -337,22 +310,21 @@ fn main() {
     hw::set_limit(a.gpu_limit);
     _ = models::CACHE.set(a.cache.clone());
     _ = ALLOWED.set(a.origins.clone());
-    models::DOWNLOAD.store(a.download, Ordering::Relaxed);
-    // Model files this computer lacks are downloaded only when the user chose to: otherwise the server lists them, with
-    // their sizes, for the plugin to ask (exit 4), and stops.
-    let lacking = missing(&a);
-    if !lacking.is_empty() && !a.download {
-        let total: u64 = lacking.iter().filter_map(|m| m["mb"].as_u64()).sum();
-        println!("{}", json!({ "missing": lacking, "total_mb": total, "folder": a.cache }));
-        eprintln!("the models are not downloaded yet (about {total} MB): start the server with --download to download them into {}", a.cache.display());
-        std::process::exit(4);
+    let needs = models::Needs { cache: a.cache.clone(), model: a.model.clone(), claims_model: a.claims_model.clone(), claims: !a.no_claims, phrases: a.phrases };
+    if let Some(ids) = &a.download {
+        models::download_only(&needs, ids); // the user's terminal run: downloads, then exits
+    }
+    // Model files this computer lacks: listed for the plugin, which says which and shows the command the user runs
+    // (exit 4). Nothing is downloaded here.
+    let lacking = models::missing(&needs);
+    if !lacking.is_empty() {
+        let total: u64 = lacking.iter().filter_map(|m| m["missing_bytes"].as_u64()).sum();
+        let names: Vec<&str> = lacking.iter().filter_map(|m| m["name"].as_str()).collect();
+        println!("{}", json!({ "missing": lacking, "total_bytes": total, "folder": a.cache, "command": "--download all" }));
+        eprintln!("the models are not downloaded yet: {} (about {}). To download them, run this program with --download all in a terminal (Settings → Augmented View → Models shows the command)", names.join(", "), models::gb(total));
+        std::process::exit(models::EXIT_MISSING);
     }
     let parser = a.cache.join(PARSER);
-    if !parser.exists() {
-        if let Err(e) = models::download(PARSER_URL, &parser, "the UDPipe English model") {
-            fail(format!("{e} (or download {PARSER} from https://hdl.handle.net/11234/1-3131 into {})", a.cache.display()));
-        }
-    }
     PARSER_PATH.set(parser).expect("set once");
     // One parser alone first, then every worker's in parallel, now rather than on its first request (and the server
     // stops here, with the reason, if the model is unreadable).
@@ -406,6 +378,7 @@ fn main() {
     let app = Arc::new(App {
         fast,
         claims_model: if claims.is_some() { a.claims_model.clone() } else { String::new() },
+        needs,
         claims: claims.map(|(tx, _)| tx),
         model: a.model.clone(),
         devices,
@@ -417,6 +390,9 @@ fn main() {
 
     let router = Router::new()
         .route("/health", get(|State(app): State<Arc<App>>| async move { Json(app.info()) }))
+        .route("/models", get(|State(app): State<Arc<App>>| async move {
+            Json(tokio::task::spawn_blocking(move || models::report(&app.needs)).await.unwrap_or_default())
+        }))
         .route("/stats", get(|State(app): State<Arc<App>>| async move {
             let mut s = tokio::task::spawn_blocking(move || hw::stats(app.cuda)).await.unwrap_or_default();
             s["notes"] = json!(hw::notes());
@@ -472,21 +448,15 @@ fn main() {
 mod tests {
     use super::*;
 
-    /// Nothing is fetched without --download: what is missing is listed, with sizes where they are known.
+    /// `--download` takes ids, or none for all; the other options are read around it.
     #[test]
-    fn missing_models_are_listed_not_downloaded() {
-        let cache = std::env::temp_dir().join(format!("augmented-view-test-{}", std::process::id()));
-        let mut a = args();
-        (a.cache, a.model, a.claims_model) = (cache.clone(), "nobody/no-embedding".into(), "nobody/no-instruct".into());
-        let m = missing(&a);
-        let whats: Vec<&str> = m.iter().filter_map(|i| i["what"].as_str()).collect();
-        assert!(whats[0].starts_with("UDPipe"), "{whats:?}");
-        assert!(whats.iter().any(|w| w.starts_with("nobody/no-embedding")) && whats.iter().any(|w| w.starts_with("nobody/no-instruct")), "{whats:?}");
-        assert!(m.iter().filter(|i| i["what"].as_str().unwrap_or("").starts_with("nobody")).all(|i| i["mb"] == 0), "unknown models have no size");
-        a.no_claims = true;
-        assert!(!missing(&a).iter().any(|i| i["what"].as_str().unwrap_or("").starts_with("nobody/no-instruct")));
-        assert!(!models::DOWNLOAD.load(Ordering::Relaxed));
-        assert!(models::need("nobody/no-embedding", "config.json").is_err_and(|e| e.to_string().contains(models::MISSING)));
-        assert!(!cache.exists(), "nothing was written");
+    fn download_arguments() {
+        let parse = |v: &[&str]| parse_args(v.iter().map(|s| s.to_string()));
+        assert_eq!(parse(&["--download"]).download.as_deref(), Some("all"));
+        let a = parse(&["--download", "--phrases"]);
+        assert!(a.download.as_deref() == Some("all") && a.phrases);
+        let a = parse(&["--download", "terms,phrases", "--port", "9000"]);
+        assert!(a.download.as_deref() == Some("terms,phrases") && a.port == 9000);
+        assert!(parse(&["--port", "9000", "--phrases"]).download.is_none(), "a start to serve never downloads");
     }
 }
