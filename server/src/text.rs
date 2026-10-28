@@ -18,7 +18,8 @@ static MASKS: LazyLock<Vec<(Regex, &'static [usize])>> = LazyLock::new(|| {
         (r"`[^`]*`", &[]),                                           // inline code
         (r"(?s)\$\$.*?\$\$|\$[^$\n]+\$", &[]),                       // maths
         (r"\\\[\[\[.*?\]\]\\\]", &[]),                               // numbered citation runs \[[[#^ref-5|5]]\]
-        (r"\[@[^\]]*\]|(?<![\w.])@[\w:.-]+", &[]),                   // pandoc citations
+        // pandoc citations; a narrative key ends on a letter or digit, so the full stop after "@key." stays for the parse
+        (r"\[@[^\]]*\]|(?<![\w.])@[\w:.-]*\w", &[]),
         (r"!?\[\[[^\]|]*\|([^\]]*)\]\]", &[1]),                      // [[target|alias]]
         (r"!?\[\[([^\]]*)\]\]", &[1]),                               // [[target]]
         (r"!?\[([^\]]*)\]\([^)]*\)", &[1]),                          // [text](url)
@@ -26,7 +27,7 @@ static MASKS: LazyLock<Vec<(Regex, &'static [usize])>> = LazyLock::new(|| {
         (r"<[^>\n]+>", &[]),                                         // HTML tags
         (r"\^\[.*?\]|\[\^[^\]]*\]", &[]),                            // footnotes
         (r"(?<!\S)\^[\w-]+\s*$", &[]),                               // block id
-        (r"\*\*|__|==|~~|(?<!\w)[*_]|[*_](?!\w)|\\(?=\S)", &[]),     // emphasis markers, escapes
+        (r"\*\*|__|==|~~|(?<!\w)[*_]|[*_](?!\w)|\\(?=[^\n])", &[]),  // emphasis markers, escapes (LaTeX's "et al.\ x" too)
         (r"(?m)^\s*(?:(?:[-*+]|\d+[.)]|>+|#+)\s+)+(?:\[[ xX]\]\s+)?", &[]), // list, quote, heading and task markers
         (r"\[![\w-]+\][+-]?", &[]),                                  // callout type
         (r"\(\(<[^)\n]*\)\)", &[]),                                  // a caption's tag, ((<tag|Figure)) (Tags for Markdown)
@@ -75,6 +76,32 @@ pub struct Doc {
     pub children: Vec<Vec<usize>>,
     pub left: Vec<usize>,  // leftmost token of each token's subtree
     pub right: Vec<usize>, // rightmost
+}
+
+/// Whether a sentence's source ends as a sentence does: with `.`, `?`, `!` or `…`, before any closing quotes,
+/// brackets or emphasis, and before the links, citations, comments and block id that may follow it ("… p. 22]
+/// [[EV-0001]]." or "… shown. [@a2020] ^block"). One cut at a colon or in the middle of a link's words does not.
+pub fn ends_sentence(s: &str) -> bool {
+    static TRAILING: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r#"(?:\s+\^[\w-]+|%%(?:(?!%%).)*%%|!?\[\[[^\[\]]*\]\]|\[@[^\[\]]*\]|\^\[[^\[\]]*\]|[\s,;"'\x{201d}\x{2019})\]*_~=])$"#).expect("pattern")
+    });
+    let mut t = s;
+    while let Ok(Some(m)) = TRAILING.find(t) {
+        if m.start() == 0 {
+            return false; // nothing but markup
+        }
+        t = &t[..m.start()];
+    }
+    t.ends_with(['.', '?', '!', '\u{2026}'])
+}
+
+/// Whether a "sentence" carries on the one before: it starts with a small letter, a possessive ("'s single runs …"
+/// after "Lee et al.") or a comma, semicolon, colon or closing bracket, after any emphasis. One opening with a
+/// citation, a link, maths or a quotation is a sentence of its own.
+pub fn continues(s: &str) -> bool {
+    let t = s.trim_start_matches(['*', '_', '=', '~']);
+    let possessive = (t.starts_with("'s") || t.starts_with("\u{2019}s")) && !t.trim_start_matches(['\'', '\u{2019}'])[1..].starts_with(char::is_alphanumeric);
+    possessive || t.chars().next().is_some_and(|c| c.is_lowercase() || ",;:)".contains(c))
 }
 
 /// The text with markup blanked byte for byte, and the spans of its links (styled already: never a term or phrase).
@@ -182,30 +209,56 @@ impl Doc {
     }
 
     /// The sentences as byte ranges of the text, each running to the next one's start so that a citation, a link or the
-    /// full stop after its last word is part of it (and one that starts with a link starts at the link's brackets);
-    /// white space at either end left out. A sentence that opens with a narrative citation ("… [@b2021]. @c2022 report")
-    /// starts there too: the parser sees only "… . report" and either runs the two together or starts the sentence at
-    /// "report".
+    /// full stop after its last word is part of it (and one that starts with a link or emphasis starts at its
+    /// brackets or markers); white space at either end left out.
+    ///
+    /// The parser sees the text with its markup blanked, which misleads it in a few places, corrected here:
+    /// - a sentence that opens with a narrative citation ("… [@b2021]. @c2022 report") starts there: the parser sees
+    ///   only "… . report" and either runs the two together or starts the sentence at "report";
+    /// - a full stop right after a link or a citation ("… [[EV-0001]]. [[q#^rq|RQ2]] asks …") ends a sentence when the
+    ///   next starts with a capital, a digit, a link or a citation;
+    /// - a "sentence" that does not end with `.`, `?` or `!` (one cut at a colon, or at a line break inside a link's
+    ///   words), or that is followed by one starting with a small letter or an apostrophe ("Lee et al." | "'s gauges"),
+    ///   is joined to the next ([`ends_sentence`], [`continues`]).
     pub fn sentence_spans(&self) -> Vec<(usize, usize)> {
         static CITED_START: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?<=[.!?])\s+(@[A-Za-z])").expect("pattern"));
+        // a full stop after a link, a bracketed citation or a narrative key, then the next sentence's start
+        static MARKUP_END: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(r#"(?:\]|(?<![\w.])@[\w:.-]*\w)([.!?])["'\x{201d}\x{2019})]*\s+(!?\[\[|\[@|@|[*_]*[A-Z0-9])"#).expect("pattern")
+        });
         let cited: Vec<usize> = CITED_START.captures_iter(&self.text).flatten().filter_map(|c| c.get(1)).map(|m| m.start()).collect();
+        let marked: Vec<usize> = MARKUP_END.captures_iter(&self.text).flatten()
+            .filter_map(|c| Some((c.get(1)?.start(), c.get(2)?.start())))
+            .filter(|&(stop, _)| self.masked.as_bytes()[stop] == self.text.as_bytes()[stop]) // not inside a comment, maths or code
+            .map(|(_, s)| s)
+            .collect();
+        let (text, masked) = (self.text.as_bytes(), self.masked.as_bytes());
         let mut starts: Vec<usize> = self.sentences().iter().map(|r| {
-            let s = self.toks[r.start].s;
-            let s = self.links.iter().find(|&&(a, b)| a < s && s < b).map_or(s, |&(a, _)| a);
+            let mut s = self.toks[r.start].s;
+            s = self.links.iter().find(|&&(a, b)| a < s && s < b).map_or(s, |&(a, _)| a);
+            // back over markup that touches the first word ("*Note:*", "**Count**")
+            while s > 0 && masked[s - 1] == b' ' && !text[s - 1].is_ascii_whitespace() {
+                s -= 1;
+            }
             // back over a narrative citation (blanked in the parse) that opens the sentence
             cited.iter().copied().find(|&c| c < s && self.masked[c..s].trim().is_empty()).unwrap_or(s)
         }).collect();
         starts.extend(cited);
+        starts.extend(marked);
         starts.sort_unstable();
         starts.dedup();
-        let mut out = Vec::new();
+        let mut out: Vec<(usize, usize)> = Vec::new();
         for (i, &s) in starts.iter().enumerate() {
             let s = if i == 0 { 0 } else { s };
             let e = starts.get(i + 1).copied().unwrap_or(self.text.len());
             let seg = &self.text[s..e];
             let (a, b) = (s + (seg.len() - seg.trim_start().len()), s + seg.trim_end().len());
-            if a < b {
-                out.push((a, b));
+            if a >= b {
+                continue;
+            }
+            match out.last_mut() {
+                Some(last) if !ends_sentence(&self.text[last.0..last.1]) || continues(&self.text[a..b]) => last.1 = b,
+                _ => out.push((a, b)),
             }
         }
         out
@@ -224,6 +277,8 @@ impl Doc {
                 (r"\[@[^\]]*\]", "(citation)"),
                 (r"(?<![\w.])@([A-Za-z][\w:-]*)", "$1"),
                 (r"\\%", "%"),
+                (r"\\[ ,]", " "),                     // LaTeX's spaces: "et al.\ label", "372\,ms"
+                (r"\s\^[\w-]+\s*$", ""),               // a block id
                 (r"\*\*|__|==", ""),
                 (r"\s+", " "),
             ]
@@ -306,6 +361,57 @@ pub mod tests {
         let d = Doc::parse(text, &p);
         let got: Vec<&str> = d.sentence_spans().iter().map(|&(s, e)| &text[s..e]).collect();
         assert_eq!(got.last(), Some(&"@y2021 found an MAE of 12% on unseen servers."), "{got:?}");
+    }
+
+    #[test]
+    fn sentence_ends_and_continuations() {
+        assert!(ends_sentence("The limits are fixed [@a2020, p. 3] [[EV-0001]]."));
+        assert!(ends_sentence("It was shown. [@a2020] [[EV-0001]], [[EV-0002]] ^block-id"));
+        assert!(ends_sentence("Does it hold?\u{201d})"));
+        assert!(ends_sentence("**Done.**"));
+        assert!(!ends_sentence("The survey asked two things:"));
+        assert!(!ends_sentence("rainfall was logged by [[glossary#WMO|WMO]]"));
+        assert!(!ends_sentence("[[EV-0001]]"));
+        assert!(continues("'s field notes show it."));
+        assert!(continues("\u{2019}s results hold."));
+        assert!(continues("count the nests by hand."));
+        assert!(!continues("'Recall' is a term of art."));
+        assert!(!continues("*Note:* the logs."));
+        assert!(!continues("[[glossary#MAE|MAE]] rose."));
+        assert!(!continues("@c2022 report a student."));
+        // a narrative key ends on a letter or digit: the full stop after it is the parser's
+        let (m, _) = mask("The survey was run by @baker2019. It had three waves.");
+        assert!(m.contains(" . It") && !m.contains("baker"), "{m}");
+        assert!(mask(r"Ruiz et al.\ count").0.contains("al.  count"));
+    }
+
+    #[test]
+    fn sentences_at_citations_links_colons_and_abbreviations() {
+        let Some(p) = parser() else { return };
+        let cases: [(&str, &[&str]); 7] = [
+            ("The longest record of the lake comes from @baker2019. It spans forty winters, all logged by hand.",
+                &["The longest record of the lake comes from @baker2019.", "It spans forty winters, all logged by hand."]),
+            ("Rain fell early. Lee et al.'s gauges agree, but only for the coast. Inland, the record is thin.",
+                &["Rain fell early.", "Lee et al.'s gauges agree, but only for the coast.", "Inland, the record is thin."]),
+            (r"Two towns were surveyed in spring: the share of homes with gardens ranged from 12\% to 40\%, a wide spread.",
+                &[r"Two towns were surveyed in spring: the share of homes with gardens ranged from 12\% to 40\%, a wide spread."]),
+            ("Every station reports hourly; the readings are checked by the [[glossary#WMO|WMO]]\nNetwork before they are published.",
+                &["Every station reports hourly; the readings are checked by the [[glossary#WMO|WMO]]\nNetwork before they are published."]),
+            ("Both towns kept their old bylaws [@a2020, p. 3] [[EV-0001]]. [[intro#^rq|RQ2]] and [[intro#^hyp|H2]] ask why.",
+                &["Both towns kept their old bylaws [@a2020, p. 3] [[EV-0001]].", "[[intro#^rq|RQ2]] and [[intro#^hyp|H2]] ask why."]),
+            ("1. **Count** the nests at dawn, so that every visit is comparable. *Note:* the counts; missed sites. ^sec--count",
+                &["1. **Count** the nests at dawn, so that every visit is comparable.", "*Note:* the counts; missed sites. ^sec--count"]),
+            (r"Earlier surveys list the towns visited [[EV-0051]], and Ruiz et al.\ count the nests by hand on each visit.",
+                &[r"Earlier surveys list the towns visited [[EV-0051]], and Ruiz et al.\ count the nests by hand on each visit."]),
+        ];
+        for (text, want) in cases {
+            let d = Doc::parse(text, &p);
+            let got: Vec<&str> = d.sentence_spans().iter().map(|&(s, e)| &text[s..e]).collect();
+            assert_eq!(got, want, "{text}");
+        }
+        let d = Doc::parse(cases[5].0, &p);
+        let (s, e) = d.sentence_spans()[1];
+        assert_eq!(d.readable(s, e), "*Note:* the counts; missed sites.");
     }
 
     #[test]

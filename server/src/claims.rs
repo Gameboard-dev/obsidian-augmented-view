@@ -32,7 +32,8 @@ const STRESS_MAX_TOKENS: usize = 40;
 const STRESS_MIN_WORDS: usize = 12; // a shorter paragraph has nothing to contrast
 const CONTEXT: u32 = 8192; // tokens; a prompt of 26 long clauses stays well within it
 const COLOUR_SYSTEM: &str = "You mark up academic writing for a reader who skims. Each category is a colour that shows the role a \
-    sentence plays in its paragraph. Judge the sentence's own role, in the context of the paragraph.";
+    sentence plays in its paragraph. Judge the sentence's own role, in the context of the paragraph. If no category fits the \
+    sentence well, choose None of these.";
 const COLOUR_Q: &str = "Which category best describes the role of this sentence? Answer with its letter only.";
 const COLOUR_NONE: &str = "The sentence plays none of the roles above";
 const COLOUR_MIN_WORDS: usize = 3; // a shorter "sentence" is a fragment of markup

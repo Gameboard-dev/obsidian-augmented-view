@@ -81,6 +81,35 @@ swallow the writer's own verdicts.
 A second independent reader agreed with the first on 92% of sentences (Transitions F1 0.90, Thematic connections
 0.84), so the categories are clear to a careful reader: what limits the colours is the model's judgement, not the task.
 
+## A second measurement (2026-10-28)
+
+Two finished chapters of a thesis, a literature review read with a code of six clause colours and a methods chapter
+read with one of four, about 300 sentences, each judged by one reader against the code's descriptions. The sentences
+were split into two halves by alternate paragraph; rules and descriptions were written looking at the first half only,
+and the second half shows whether a change holds. Error rates at full sensitivity, sentences the reader called
+borderline left out (literature 50 / 69 sentences in the two halves, methods 73 / 66):
+
+| | literature, first half | second half | methods, first half | second half |
+|---|---|---|---|---|
+| before | 36% | 39% | 49% | 29% |
+| the server's corrected sentences and the "none of these" instruction | 32% | 41% | 49% | 33% |
+| the same, with the user's descriptions and rules refined | 28% | 39% | 30% | 29% |
+
+- **Sentences.** The corrected splitting ([Colour codes](colour-codes.md#what-the-models-are-told)) removes fragments
+  such as "Lee et al." coloured on their own and two sentences coloured as one; accuracy is unchanged within noise
+  (one or two sentences a half either way).
+- **"None of these".** Telling the model to choose it when no colour fits changed one or two sentences a half, never for
+  the worse; kept. Rewording the option itself made the methods chapter worse and was dropped.
+- **The heading path** of each paragraph ("Method > Threats to validity") given as context made both chapters slightly
+  worse: not kept.
+- **Descriptions** rewritten for the literature code moved errors between colours (fewer in the first half, more in the
+  second): not a gain. For the methods code, a narrower measurement colour plus a hidden colour for design, materials
+  and data cut errors from 49% to 42% (first half) and 35% to 30% (second).
+- **Rules** worked where a pattern is unambiguous: gap sentences opening "First, no …" or saying "has not been examined"
+  (limitations) held in the second half; one turning "@key found …" into findings did not (39% → 42%) and was dropped.
+- **Sensitivity.** In the literature chapter, a floor of 0.95 (sensitivity 5%) left 10–20% of sentences unmarked and
+  raised the share of drawn colours that were right from 71% to 78% (first half) and 61% to 63% (second).
+
 ## What else was measured
 
 **Prompt variants** (2026-10-25, same sample, sharper descriptions; the baseline, one order: 53% strict, 66% lenient,
