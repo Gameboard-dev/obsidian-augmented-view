@@ -1,0 +1,6 @@
+# Settings every build of the server needs (machine-specific ones: README, "Building the server").
+#
+# Windows: the C runtime is linked statically, as candle's CUDA kernels are built (/MT); the cc crate then builds UDPipe
+# the same way, so the two link together (https://doc.rust-lang.org/reference/linkage.html#static-and-dynamic-c-runtimes).
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

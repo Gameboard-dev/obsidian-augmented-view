@@ -1,0 +1,45 @@
+[package]
+name = "augmented-view-server"
+version = "0.6.0"
+edition = "2021"
+description = "Augmented View's model server: key terms (UDPipe + bge embeddings), sentence colours (Qwen3-4B) and phrase colours (GLiNER2), on the GPU when there is one"
+publish = false
+
+# One build per kind of machine (README, "Server"): `cuda` for NVIDIA GPUs (the default), `metal` for Apple GPUs, and
+# `--no-default-features` for the CPU only. Every build falls back to the CPU by itself; a CUDA build on Windows
+# delay-loads CUDA's libraries (build.rs) so it starts without them. On Linux a CUDA build cannot start without them,
+# and the plugin then starts its CPU build.
+[features]
+default = ["cuda"]
+cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda", "native-kit/cuda"]
+metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal", "native-kit/metal"]
+
+[dependencies]
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "signal"] }
+tokio-stream = { version = "0.1", default-features = false }
+candle-core = "0.11"
+candle-nn = "0.11"
+candle-transformers = "0.11"
+tokenizers = { version = "0.22", default-features = false, features = ["onig"] }
+udpipe-rs = "0.2"
+fancy-regex = "0.14"
+rayon = "1" # already built for candle
+stop-words = { version = "0.10", default-features = false, features = ["nltk"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Downloads (models the machine lacks): udpipe-rs's HTTP client already, with the operating system's certificate store
+# (<https://docs.rs/ureq/latest/ureq/tls/enum.RootCerts.html>), so it works behind antivirus or company TLS inspection.
+ureq = { version = "3", features = ["platform-verifier"] }
+# The hardware: device choice with reasons, NVML/sysinfo readings, GPU pacing (shared with Quarry's service).
+native-kit = { path = "../../native-kit", features = ["candle"] }
+# GLiNER2 for the phrase colours (phrases.rs), on candle 0.10 and the CPU (it makes its inputs on the CPU).
+gliner2 = "0.1.3"
+
+# opt-level 3; thin LTO keeps linking candle's large dependency graph to minutes rather than many. Machine-specific
+# flags (target-cpu=native, the CUDA compiler's settings) belong in a cargo config outside this folder (README).
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 16
+panic = "abort"

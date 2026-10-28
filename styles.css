@@ -1,0 +1,197 @@
+/* The marks are tints behind the text, in the colours of the colour code: the stylesheet is generated from the settings
+   (colours.rs) into <style id="augmented-view-colours">. Bold, italics and underlines are left to the writer. A phrase
+   colour's tint keeps its padding on every line a mark wraps over. */
+.av {
+  border-radius: 2px;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+}
+
+/* A colour's row in the settings: its name, what it marks, then its controls, wrapping on a narrow pane. */
+.av-colour-row .setting-item-control {
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.av-colour-row textarea {
+  min-width: 14em;
+  min-height: 2.6em;
+}
+
+/* The floating key (key.rs): a small panel over the workspace, dragged by its title bar, folded to it. */
+.av-key {
+  position: fixed;
+  right: 24px;
+  bottom: 48px;
+  z-index: var(--layer-popover);
+  width: 250px;
+  max-height: 85vh;
+  min-width: 180px;
+  min-height: 60px;
+  overflow: auto;
+  resize: both; /* by its corner; the size is kept on this device */
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-m);
+  box-shadow: var(--shadow-s);
+  font-size: calc(var(--font-ui-smaller) * var(--av-key-scale, 1));
+}
+
+.av-key-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  cursor: grab;
+  border-bottom: 1px solid var(--background-modifier-border);
+  user-select: none;
+  touch-action: none;
+}
+
+.av-key-title {
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.av-key-code {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--font-ui-smaller);
+  height: auto;
+  padding: 1px 20px 1px 6px;
+}
+
+.av-key-fold {
+  cursor: pointer;
+  transition: transform 0.15s;
+}
+
+.av-key.is-folded .av-key-body {
+  display: none;
+}
+
+.av-key.is-folded .av-key-head {
+  border-bottom: none;
+}
+
+.av-key.is-folded .av-key-fold {
+  transform: rotate(-90deg);
+}
+
+.av-key-body {
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.av-key-line,
+.av-key-folder {
+  color: var(--text-muted);
+}
+
+.av-key-chips {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.av-key-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* A colour hidden from the notes (its check box off): its chip greyed. */
+.av-key-chip.is-hidden-colour {
+  opacity: 0.5;
+}
+
+.av-key-show {
+  margin: 0;
+}
+
+.av-key-swatch {
+  flex: none;
+  background: var(--av-swatch);
+  width: calc(14px * var(--av-key-scale, 1));
+  height: calc(10px * var(--av-key-scale, 1));
+  border-radius: 2px;
+  border: 1px solid var(--background-modifier-border);
+}
+
+/* the note's own colours in each theme, opacity included (colours::painted) */
+.theme-dark .av-key-swatch {
+  background: var(--av-swatch-dark, var(--av-swatch));
+}
+
+.av-key-swatch.is-phrase {
+  height: calc(6px * var(--av-key-scale, 1));
+  border-radius: 3px;
+}
+
+.av-key-add {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.av-key-add input[type="text"] {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--font-ui-smaller);
+}
+
+.av-key-add input[type="color"] {
+  width: 24px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  background: none;
+}
+
+.av-status::before {
+  content: "";
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: 5px;
+  border-radius: 50%;
+  background: var(--text-faint);
+  vertical-align: middle;
+}
+
+.av-status.is-running::before {
+  background: var(--color-green);
+}
+
+.av-status.is-busy::before {
+  background: var(--color-orange);
+}
+
+/* A reading at or above Warn at (GPU busy or full, or the computer's memory full): the tooltip says which. */
+.av-status.is-warning::before {
+  background: var(--color-red);
+}
+
+/* The key moved by hand (key.rs, place), and hidden where no note is open. */
+.av-key.is-placed {
+  left: var(--av-key-x);
+  top: var(--av-key-y);
+  right: auto;
+  bottom: auto;
+}
+
+.av-key.is-hidden {
+  display: none;
+}
+
+/* folded: just the title bar, whatever size the key was given */
+.av-key.is-folded {
+  height: auto !important;
+  min-height: 0;
+  resize: none;
+}
+
+/* the key's own controls follow its scale too */
+.av-key .av-key-code, .av-key .av-key-title, .av-key .av-key-name, .av-key .av-key-line, .av-key .av-key-folder { font-size: inherit; }
