@@ -125,11 +125,57 @@ pub struct Colour {
     /// Hidden from the notes (its check box in the floating key off): no rule in the stylesheet, so what it marks is
     /// not drawn (user, 2026-10-28).
     pub hidden: bool,
+    /// The user's own rules for this colour (rules.rs, [`Rule`]): applied in the worker, they win over the model.
+    pub rules: Vec<Rule>,
 }
 
 impl Default for Colour {
     fn default() -> Self {
-        Colour { name: "New colour".into(), hex: "#FFF59D".into(), dark: String::new(), opacity: 0.6, level: Level::Clause, description: String::new(), kinds: Vec::new(), hidden: false }
+        Colour { name: "New colour".into(), hex: "#FFF59D".into(), dark: String::new(), opacity: 0.6, level: Level::Clause, description: String::new(), kinds: Vec::new(), hidden: false, rules: Vec::new() }
+    }
+}
+
+/// How a rule finds what it applies to.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum RuleKind {
+    /// Words and phrases, separated by commas: whole words, in any case, outside links, code, maths and citations
+    /// (bold.rs's matching).
+    #[default]
+    Words,
+    /// A regular expression (regex-lite's syntax), at most `rules::MAX_PATTERN` characters.
+    Pattern,
+}
+
+/// What a rule does where it matches.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum Action {
+    /// A clause colour: a sentence it matches takes this colour, whatever the model chose. A phrase colour: what it
+    /// matches is marked in this colour.
+    #[default]
+    Force,
+    /// A clause colour: a sentence it matches never takes this colour (the model's choice is dropped, and this
+    /// colour's own Force rules do not apply). A phrase colour: the model's phrases of this colour that it overlaps
+    /// are dropped.
+    Forbid,
+}
+
+/// One of the user's rules for a colour (COLOUR-CODES.md, "Rules"; README, "Rules"). Kept in data.json with its colour.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Rule {
+    pub kind: RuleKind,
+    pub action: Action,
+    /// The words (comma-separated) or the pattern.
+    pub text: String,
+    /// Off: kept but not applied.
+    pub on: bool,
+}
+
+impl Default for Rule {
+    fn default() -> Self {
+        Rule { kind: RuleKind::Words, action: Action::Force, text: String::new(), on: true }
     }
 }
 
@@ -281,8 +327,14 @@ pub fn stylesheet(code: &ColourCode) -> String {
             rule(class, colour);
         }
     }
-    for (i, colour) in model_colours(code).into_iter().chain(model_phrases(code)) {
-        rule(&crate::pick::class(crate::pick::COLOUR + i as u8), colour);
+    // the colours the models find, and any colour with rules of its own (a phrase colour's words a rule marks)
+    let own = code.colours.iter().enumerate().filter(|(i, c)| *i < crate::pick::MAX_COLOURS && c.rules.iter().any(|r| r.on));
+    let mut seen = Vec::new();
+    for (i, colour) in model_colours(code).into_iter().chain(model_phrases(code)).chain(own) {
+        if !seen.contains(&i) {
+            seen.push(i);
+            rule(&crate::pick::class(crate::pick::COLOUR + i as u8), colour);
+        }
     }
     css
 }

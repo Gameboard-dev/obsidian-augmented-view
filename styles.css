@@ -18,6 +18,40 @@
   min-height: 2.6em;
 }
 
+/* The Rules section (rules_tab.rs): each rule's controls wrap; its pattern field is wide; a colour opened from its
+   Rules button flashes once. */
+.av-rule-row {
+  padding-left: 1.5em;
+}
+
+.av-rule-row .setting-item-control {
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.av-rule-row input[type="text"] {
+  min-width: 16em;
+  font-family: var(--font-monospace);
+}
+
+.av-rule-test textarea {
+  min-width: 20em;
+  min-height: 3.5em;
+}
+
+.av-flash {
+  animation: av-flash 1.5s ease-out;
+}
+
+@keyframes av-flash {
+  from {
+    background-color: var(--text-highlight-bg);
+  }
+  to {
+    background-color: transparent;
+  }
+}
+
 /* The floating key (key.rs): a small panel over the workspace, dragged by its title bar, folded to it. */
 .av-key {
   position: fixed;

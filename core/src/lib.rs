@@ -20,6 +20,7 @@ mod msg;
 mod pick;
 mod reading;
 mod rules;
+mod rules_tab;
 mod split;
 mod view;
 

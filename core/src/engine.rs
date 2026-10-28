@@ -224,6 +224,8 @@ pub struct Engine {
     settings: Settings,
     /// The user's own terms, from the settings (bold::terms).
     bold: Vec<Vec<char>>,
+    /// Each colour code's own rules, compiled once per settings (rules::CodeRules), by the code's id.
+    rules: HashMap<String, rules::CodeRules>,
     notes: HashMap<String, Note>,
     views: HashMap<u32, View>,
     blocks: HashMap<u32, Block>,
@@ -254,6 +256,7 @@ impl Engine {
             ToWorker::Settings(s) => {
                 let diversity = (s.diversity - self.settings.diversity).abs() > 1e-6;
                 self.bold = bold::terms(&s.bold_terms);
+                self.rules = s.colour_codes.iter().filter_map(|c| Some((c.id.clone(), rules::CodeRules::new(c)?))).collect();
                 self.settings = s;
                 if diversity && !self.keys[FAST].is_empty() {
                     let model = self.keys[FAST].split('|').next().unwrap_or("").to_string();
@@ -557,7 +560,8 @@ impl Engine {
     /// The ranges to mark in a paragraph, in the note's UTF-16 offsets: the chosen spans, the user's own terms and the
     /// citations, with each sentence's colour cut where a rule of its code wins (pick::cut).
     fn para_ranges(&self, path: &str, note: &Note, p: &Para) -> Vec<(u32, u32, u8)> {
-        let spans = note.spans(p.id);
+        let ruled = self.ruled(path, note, p);
+        let spans: Vec<&Span> = ruled.as_ref().map_or_else(|| note.spans(p.id), |r| r.iter().collect());
         let mut out = pick::source_ranges(&spans, p.words, p.to16 - p.from16, &self.settings);
         if self.own_on() {
             out.extend(bold::source_ranges(note.para_text(p), &self.bold).into_iter().map(|(a, e)| (a, e, pick::TERM)));
@@ -568,6 +572,12 @@ impl Engine {
         pick::tidy(&mut out);
         pick::cut(&mut out, self.code_of(path).map_or(0, colours::rule_mask));
         out.into_iter().map(|(a, e, k)| (p.from16 + a, p.from16 + e, k)).collect()
+    }
+
+    /// A paragraph's spans with its code's own rules applied (rules::CodeRules::apply), or None when the code has none.
+    fn ruled(&self, path: &str, note: &Note, p: &Para) -> Option<Vec<Span>> {
+        let code = self.code_of(path)?;
+        Some(self.rules.get(&code.id)?.apply(note.para_text(p), &note.spans(p.id)))
     }
 
     /// The colour code that applies to a note (colours::assigned).
@@ -609,8 +619,9 @@ impl Engine {
         let Some(id) = self.block_para(block) else { return Vec::new() };
         let b = &self.blocks[&block];
         let note = &self.notes[&b.path];
-        let spans = note.spans(id);
         let Some(p) = note.paras.iter().find(|p| p.id == id) else { return Vec::new() };
+        let ruled = self.ruled(&b.path, note, p);
+        let spans: Vec<&Span> = ruled.as_ref().map_or_else(|| note.spans(id), |r| r.iter().collect());
         let mut found: Vec<(u32, u32, u8)> = Vec::new();
         if self.own_on() {
             found.extend(bold::block_ranges(note.para_text(p), &b.text, &self.bold).into_iter().map(|(a, e)| (a, e, pick::TERM)));
@@ -838,8 +849,7 @@ mod tests {
                             let id = p["id"].as_str().unwrap();
                             asked.push(e.notes["a.md"].paras.iter().position(|q| format!("{:016x}", q.id) == id).unwrap());
                             reply += &format!(r#"{{"id":"{id}","spans":[{{"k":"term","t":"x","w":0.9,"at":[[0,9]],"v":"Paragraph"}}]}}"#);
-                            reply += "
-";
+                            reply += "\n";
                         }
                         let cut = reply.len() / 2; // a chunk boundary inside a line
                         e.handle(ToWorker::Chunk { req, text: reply[..cut].into() }, now);
@@ -1110,6 +1120,32 @@ mod tests {
         // with the server's own terms (each paragraph's first word): both
         set(&mut e, "session", 0.5, true);
         assert_eq!(drawn(&mut e, text).0, ["0:Paragraph", "0:session", "0:Paragraph", "0:Session"]);
+    }
+
+    #[test]
+    fn a_colour_s_own_rules_show_at_once_in_both_views_and_never_ask_the_server() {
+        use crate::colours::{Action, Rule, RuleKind};
+        let mut s = Settings { context_paragraphs: 0, sensitivity: 1.0, ..Default::default() };
+        colours::link(&mut s.links, "a.md", "reading", false);
+        let mut e = Engine::default();
+        e.handle(ToWorker::Settings(s.clone()), 0.0);
+        e.handle(ToWorker::Server { running: false, model: "m".into(), claims_model: "q".into(), has_claims: true, max_paras: 8 }, 0.0);
+        let text = "Detectors fail. Second, no study has tried.";
+        open(&mut e, "a.md", text, None);
+        e.handle(ToWorker::View { id: 1, path: "a.md".into(), editor: true, vis: (0, 10), render: (0, 100_000) }, -PREFETCH_MS);
+        assert_eq!(drawn(&mut e, text).0, Vec::<String>::new());
+        // a Force rule for Limitations (the code's sixth colour)
+        let mut t = s.clone();
+        t.colour_codes[0].colours[5].rules.push(Rule { kind: RuleKind::Pattern, action: Action::Force, text: "^(First|Second), no\\b".into(), on: true });
+        e.handle(ToWorker::Settings(t.clone()), 0.0);
+        let limitations = pick::COLOUR + 5;
+        assert_eq!(drawn(&mut e, text), (vec![format!("{limitations}:Second, no study has tried.")], false), "drawn at once, nothing sent");
+        e.handle(ToWorker::Block { id: 7, path: "a.md".into(), lines: Some((0, 0)), idx: 0, n: 1, text: text.into() }, 0.0);
+        assert_eq!(e.wrap(7), vec![(16, 43, 1 << limitations)], "Reading view too");
+        // switched off: gone at once
+        t.colour_codes[0].colours[5].rules[0].on = false;
+        e.handle(ToWorker::Settings(t), 0.0);
+        assert_eq!(drawn(&mut e, text).0, Vec::<String>::new());
     }
 
     #[test]

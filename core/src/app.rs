@@ -88,6 +88,9 @@ pub struct App {
     /// The floating key's element (key.rs), and whether choosing a code there links the note's folder.
     pub(crate) key: JsValue,
     pub(crate) key_folder: bool,
+    /// The settings' Rules section (rules_tab.rs): the code it shows, and the sentence in its test box.
+    pub(crate) rules_code: usize,
+    pub(crate) rules_test: String,
 }
 
 thread_local! {
@@ -173,6 +176,8 @@ pub fn start(plugin: JsValue, obs: JsValue, require: Function, module: JsValue, 
         persist: None,
         tab: JsValue::UNDEFINED,
         key: JsValue::UNDEFINED,
+        rules_code: 0,
+        rules_test: String::new(),
         key_folder: false,
         plugin,
         obs,
@@ -855,6 +860,7 @@ impl App {
         obsidian_kit::settings::render(tab, &self.obs, UI, |k| self.field(k), |k, v| _ = with(|a| a.set_field(k, v))); // called inside with(): read self, not the App again
         crate::models::section(self);
         self.colour_settings(tab);
+        crate::rules_tab::section(self, tab);
     }
 
     /// Whether this device may start the server (desktop Obsidian outside a sandbox).
@@ -963,6 +969,11 @@ impl App {
                 call!(s, addExtraButton, f1(move |b| {
                     call!(call!(b, setIcon, "rotate-ccw"), setTooltip, "Dark theme: back to the automatic colour");
                     call!(b, onClick, f0(move || edit(Box::new(move |codes| codes[ci].colours[k].dark.clear()), true)))
+                }));
+                let n = c.rules.len();
+                call!(s, addExtraButton, f1(move |b| {
+                    call!(call!(b, setIcon, "list-checks"), setTooltip, format!("Rules ({n}): this colour's own rules, below"));
+                    call!(b, onClick, f0(move || crate::rules_tab::show(ci, k)))
                 }));
                 call!(s, addExtraButton, f1(move |b| {
                     call!(call!(b, setIcon, "trash"), setTooltip, "Remove this colour");
