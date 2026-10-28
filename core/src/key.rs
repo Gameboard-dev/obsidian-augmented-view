@@ -1,4 +1,4 @@
-//! The floating key (COLOUR-CODES.md): a small panel over the workspace showing the open note's colour code, every
+//! The floating key (docs/colour-codes.md): a small panel over the workspace showing the open note's colour code, every
 //! colour as a chip with its name and what it marks. It is dragged by its title bar and folds to the title bar alone;
 //! its place and fold are this device's (msg::Local). From it the note, or its folder, is linked to a code (or to
 //! none), and a colour is added to the code. A note with no code shows the picker and a line saying nothing is sent to

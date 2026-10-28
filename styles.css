@@ -257,3 +257,33 @@
   display: block;
   margin-top: 0.5em;
 }
+
+/* The settings tab's contents (the same layout in each of the author's plugins): a column of links to the left of the settings that
+   stays in view as they scroll, where the window is wide enough; above the settings, in a line, where it is not. */
+.setting-contents { margin-bottom: var(--size-4-4); font-size: var(--font-ui-small); }
+.setting-contents-title { font-weight: var(--font-semibold); margin-bottom: var(--size-2-2); }
+@media (min-width: 1000px) {
+  body:not(.is-mobile) .setting-contents-layout {
+    display: grid;
+    grid-template-columns: 11rem minmax(0, 1fr);
+    column-gap: var(--size-4-6);
+    align-items: start;
+  }
+  body:not(.is-mobile) .setting-contents-layout > * { grid-column: 2; }
+  body:not(.is-mobile) .setting-contents-layout > .setting-contents {
+    grid-column: 1;
+    grid-row: 1 / span 999;
+    position: sticky;
+    top: 0;
+    max-height: calc(100vh - 12rem);
+    overflow-y: auto;
+    margin-bottom: 0;
+    padding-right: var(--size-4-2);
+    border-right: 1px solid var(--background-modifier-border);
+  }
+  body:not(.is-mobile) .setting-contents-layout .setting-contents-links a {
+    display: block;
+    padding: var(--size-2-1) 0;
+  }
+  body:not(.is-mobile) .setting-contents-layout .setting-contents-sep { display: none; }
+}

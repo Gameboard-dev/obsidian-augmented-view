@@ -17,7 +17,8 @@
 //! such fallback is reported with its reason in `notes`. On start, when model files are missing, the server prints one
 //! line, {"missing": [{"id", "purpose", "name", "page", "licence", "licence_url", "folder", "files", "missing_bytes",
 //! ...}], "total_bytes", "folder", "command"}, and exits with code 4: it never downloads anything when it is started to
-//! serve. `--download <ids|all>` is the download-only run the user starts in a terminal (models.rs), never the plugin.
+//! serve by the plugin. `--download <ids|all>` is the download-only run the user starts in a terminal (models.rs), never
+//! the plugin; a server the user starts by hand in a terminal asks first whether to download them (`--no-prompt` not to).
 //! Once the models are loaded it prints one line, {"ready": true, ...}; with --idle-minutes N it
 //! exits after N minutes without a request, freeing the GPU. Browsers ask before cross-origin POSTs, so OPTIONS is
 //! answered (<https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/CORS#preflighted_requests>), for Obsidian's
@@ -56,7 +57,7 @@ const PROTOCOL: u32 = 8; // 2: spans carry "v"; 3: UDPipe's parse; 4: quotations
 /// Obsidian's own origins: desktop, iOS, Android (<https://capacitorjs.com/docs/config>, `server.hostname`).
 const ORIGINS: [&str; 3] = ["app://obsidian.md", "capacitor://localhost", "http://localhost"];
 pub const PARSER: &str = "english-ewt-ud-2.5-191206.udpipe"; // UD 2.5 models, CC BY-NC-SA 4.0 (https://hdl.handle.net/11234/1-3131)
-/// About how much memory each layer's models take (measured: README, "GPU memory"), on the GPU and on the CPU.
+/// About how much memory each layer's models take (measured: docs/gpu-and-memory.md, "Memory needed"), on the GPU and on the CPU.
 const TERMS_MB: (u64, u64) = (600, 1200);
 const POINTS_MB: (u64, u64) = (3500, 4000);
 
@@ -148,10 +149,20 @@ struct Args {
     download: Option<String>,
     /// The note's colour codes have phrase colours, so GLiNER2 is needed too (checked at start with the others).
     phrases: bool,
+    /// `--no-prompt`: never ask in a terminal to download missing models (models::may_ask).
+    no_prompt: bool,
 }
 
 fn args() -> Args {
     parse_args(std::env::args().skip(1))
+}
+
+/// Whether this run may ask in the terminal to download missing models: started by hand in a terminal (input, output
+/// and error output all terminals, std's IsTerminal) and without `--no-prompt`. The plugin starts the server with its
+/// input ignored and its output piped, so it is never asked.
+fn may_ask(a: &Args) -> bool {
+    use std::io::IsTerminal;
+    models::may_ask(std::io::stdin().is_terminal(), std::io::stdout().is_terminal(), std::io::stderr().is_terminal(), a.no_prompt)
 }
 
 fn parse_args(args: impl Iterator<Item = String>) -> Args {
@@ -168,6 +179,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Args {
         origins: ORIGINS.iter().map(|o| o.to_string()).collect(),
         download: None,
         phrases: false,
+        no_prompt: false,
     };
     let mut it = args.peekable();
     while let Some(k) = it.next() {
@@ -190,6 +202,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Args {
             "--gpu" => a.gpu = v(),
             "--origin" => a.origins.push(v()),
             "--phrases" => a.phrases = true,
+            "--no-prompt" => a.no_prompt = true,
             _ => eprintln!("unknown argument {k}"),
         }
     }
@@ -314,9 +327,25 @@ fn main() {
     if let Some(ids) = &a.download {
         models::download_only(&needs, ids); // the user's terminal run: downloads, then exits
     }
-    // Model files this computer lacks: listed for the plugin, which says which and shows the command the user runs
-    // (exit 4). Nothing is downloaded here.
-    let lacking = models::missing(&needs);
+    // Model files this computer lacks. Started by the plugin: listed for it, which says which and shows the command the
+    // user runs (exit 4), and nothing is downloaded. Started by hand in a terminal: the user is asked whether to
+    // download them now, and on a yes they are downloaded (as --download all) and the server starts.
+    let mut lacking = models::missing(&needs);
+    if !lacking.is_empty() && may_ask(&a) {
+        let total: u64 = lacking.iter().filter_map(|m| m["missing_bytes"].as_u64()).sum();
+        if models::ask(&lacking, total, &a.cache) {
+            let code = models::download(&needs, "all", true);
+            if code != 0 {
+                std::process::exit(code);
+            }
+            lacking = models::missing(&needs);
+        } else {
+            let program = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_else(|_| "augmented-view-server".into());
+            let given: Vec<String> = std::env::args().skip(1).collect();
+            eprintln!("Not downloaded. To download them later, run:\n  {}", models::later_command(&program, &given, cfg!(windows)));
+            std::process::exit(models::EXIT_MISSING);
+        }
+    }
     if !lacking.is_empty() {
         let total: u64 = lacking.iter().filter_map(|m| m["missing_bytes"].as_u64()).sum();
         let names: Vec<&str> = lacking.iter().filter_map(|m| m["name"].as_str()).collect();
@@ -458,5 +487,6 @@ mod tests {
         let a = parse(&["--download", "terms,phrases", "--port", "9000"]);
         assert!(a.download.as_deref() == Some("terms,phrases") && a.port == 9000);
         assert!(parse(&["--port", "9000", "--phrases"]).download.is_none(), "a start to serve never downloads");
+        assert!(parse(&["--no-prompt", "--port", "9000"]).no_prompt && !parse(&["--port", "9000"]).no_prompt);
     }
 }

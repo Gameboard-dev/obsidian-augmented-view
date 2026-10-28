@@ -1,4 +1,4 @@
-//! Colour codes (COLOUR-CODES.md): keys of colours, each colour a category drawn as a background tint, never bold,
+//! Colour codes (docs/colour-codes.md): keys of colours, each colour a category drawn as a background tint, never bold,
 //! italic or underline. A colour marks a clause (a pale `background-color`) or a phrase (a `background-image` drawn
 //! over it, so a key term inside a claim still shows); each has its own opacity. Light themes use the hex as given;
 //! dark themes a deeper version of the same hue ([`dark`]), so light text stays readable. Everything is one generated
@@ -161,7 +161,7 @@ pub enum Action {
     Forbid,
 }
 
-/// One of the user's rules for a colour (COLOUR-CODES.md, "Rules"; README, "Rules"). Kept in data.json with its colour.
+/// One of the user's rules for a colour (docs/colour-codes.md, "Rules"; docs/colour-codes.md, "Rules"). Kept in data.json with its colour.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Rule {

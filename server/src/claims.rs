@@ -37,7 +37,7 @@ const COLOUR_Q: &str = "Which category best describes the role of this sentence?
 const COLOUR_NONE: &str = "The sentence plays none of the roles above";
 const COLOUR_MIN_WORDS: usize = 3; // a shorter "sentence" is a fragment of markup
 
-/// A colour the model looks for (COLOUR-CODES.md): its index in the colour code, its name and its description.
+/// A colour the model looks for (docs/colour-codes.md): its index in the colour code, its name and its description.
 #[derive(serde::Deserialize, Clone)]
 pub struct Category {
     pub i: usize,
@@ -228,13 +228,13 @@ impl Claims {
         Ok(out)
     }
 
-    /// Each sentence's colour (COLOUR-CODES.md, "The model's part"): the colours, lettered, with their descriptions,
+    /// Each sentence's colour (docs/colour-codes.md, "The model's part"): the colours, lettered, with their descriptions,
     /// then the paragraph, then one question per sentence; the logits of the letters at the first answer position give
     /// the colour, so nothing is generated, and the listing up to the question runs once for all the sentences
     /// ([`Claims::ask`]). The last letter is "none of these"; a sentence it wins is left out. "w" is the chosen colour's
     /// probability, so the plugin can draw only the surer ones. Contrast words first when `stress`.
     ///
-    /// Measured against variants that did no better (README, "Colours"): the colours listed in two orders, calibration
+    /// Measured against variants that did no better (docs/models.md): the colours listed in two orders, calibration
     /// against an empty sentence, the sentence's place in the paragraph, a hint to prefer a sentence's job over its
     /// topic, the sentence marked inside the paragraph, the colours' names instead of letters, and a short reason
     /// generated before the answer (as good, 18 times slower).

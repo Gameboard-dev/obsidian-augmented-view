@@ -563,7 +563,7 @@ fn fixed(mut s: Settings) -> Settings {
     (s.terms, s.contrast, s.quotes, s.definitions, s.points) = (true, true, true, true, true);
     s
 }
-/// Where the servers for each kind of computer are published (README, "Install").
+/// Where the servers for each kind of computer are published (docs/installation.md).
 const RELEASES: &str = "https://github.com/Gameboard-dev/obsidian-augmented-view/releases";
 
 impl App {

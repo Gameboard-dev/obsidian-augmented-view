@@ -1,4 +1,4 @@
-//! Rules (COLOUR-CODES.md, "Rules"; README, "Rules"), found in the worker in each paragraph's text, never by the server,
+//! Rules (docs/colour-codes.md, "Rules"; docs/colour-codes.md, "Rules"), found in the worker in each paragraph's text, never by the server,
 //! so they show at once, also on cached paragraphs, and cost no GPU.
 //!
 //! - **Built-in:** citations, Pandoc's bracketed `[@key, p. 3]` and `[@a; @b]` and narrative `@key`

@@ -6,7 +6,7 @@ description = "Augmented View's model server: key terms (UDPipe + bge embeddings
 publish = false
 license = "MIT"
 
-# One build per kind of machine (README, "Server"): `cuda` for NVIDIA GPUs (the default), `metal` for Apple GPUs, and
+# One build per kind of machine (docs/building.md, "The server"): `cuda` for NVIDIA GPUs (the default), `metal` for Apple GPUs, and
 # `--no-default-features` for the CPU only. Every build falls back to the CPU by itself; a CUDA build on Windows
 # delay-loads CUDA's libraries (build.rs) so it starts without them. On Linux a CUDA build cannot start without them,
 # and the plugin then starts its CPU build.
@@ -37,7 +37,7 @@ native-kit = { path = "../../native-kit", features = ["candle", "download"] }
 gliner2 = "0.1.3"
 
 # opt-level 3; thin LTO keeps linking candle's large dependency graph to minutes rather than many. Machine-specific
-# flags (target-cpu=native, the CUDA compiler's settings) belong in a cargo config outside this folder (README).
+# flags (target-cpu=native, the CUDA compiler's settings) belong in a cargo config outside this folder (docs/building.md).
 [profile.release]
 opt-level = 3
 lto = "thin"

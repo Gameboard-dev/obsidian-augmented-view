@@ -1,4 +1,4 @@
-//! The settings tab's Rules section (COLOUR-CODES.md, "Rules"; README, "Rules"): a colour code chosen at its top, each of
+//! The settings tab's Rules section (docs/colour-codes.md, "Rules"; docs/colour-codes.md, "Rules"): a colour code chosen at its top, each of
 //! its colours with its rules (Force or Forbid, words or a pattern, on or off), add and delete, and a box to test the
 //! code's rules on a sentence. Each colour row of the colour codes above has a Rules button that opens this section on
 //! that colour (scrolled to and flashed). The rules are kept with their colour in data.json and applied in the worker

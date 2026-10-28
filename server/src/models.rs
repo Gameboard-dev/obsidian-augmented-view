@@ -10,7 +10,11 @@
 //!   starts in a terminal ([`download_only`]): it fetches the missing files with its progress printed to the terminal
 //!   and exits. Each file goes through a `.part` file, is resumed when a run was interrupted (Ctrl+C, a lost
 //!   connection), and is checked against its size and the checksum Hugging Face publishes (native-kit's `download`);
-//!   the parser, from LINDAT, against the SHA-256 of the file whose MD5 LINDAT publishes.
+//!   the parser, from LINDAT, against the SHA-256 of the file whose MD5 LINDAT publishes;
+//! - a server the user starts to serve by hand, in a terminal ([`may_ask`]: its input and output are terminals, and
+//!   no `--no-prompt`), lists the missing models and asks `Download them now? [y/N]` ([`ask`]); on a yes it downloads
+//!   them as `--download all` would and then starts, on anything else it exits as above with the command to run
+//!   later. Started by the plugin (input ignored, output piped) it is never asked.
 //!
 //! The manifest pins each default model to a commit, with its files' sizes and checksums from the Hugging Face API
 //! (`https://huggingface.co/api/models/<repo>?blobs=true`, checked 2026-10-28). A model set by hand (`--model`,
@@ -343,37 +347,103 @@ pub fn chosen(n: &Needs, ids: &str) -> std::result::Result<Vec<Model>, String> {
 
 /// Set by Ctrl+C: the download stops after its current read, keeping its `.part` for the next run.
 static CANCEL: AtomicBool = AtomicBool::new(false);
+/// A download is running: Ctrl+C stops it gently. Otherwise (a server that downloaded at the terminal's question and
+/// went on to serve) Ctrl+C ends the program at once, as it does a server that never downloaded.
+static DOWNLOADING: AtomicBool = AtomicBool::new(false);
 
-/// Ctrl+C once: stop after the current read (the next run resumes); twice: stop at once (tokio's ctrl_c,
-/// <https://docs.rs/tokio/latest/tokio/signal/fn.ctrl_c.html>, SetConsoleCtrlHandler on Windows, SIGINT elsewhere).
+/// Ctrl+C during a download, once: stop after the current read (the next run resumes); twice: stop at once. Outside a
+/// download: stop at once. (tokio's ctrl_c, <https://docs.rs/tokio/latest/tokio/signal/fn.ctrl_c.html>,
+/// SetConsoleCtrlHandler on Windows, SIGINT elsewhere.)
 fn on_ctrl_c() {
     std::thread::spawn(|| {
         let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() else { return };
         rt.block_on(async {
-            if tokio::signal::ctrl_c().await.is_ok() {
-                CANCEL.store(true, Ordering::SeqCst);
-                eprintln!("\nStopping: what was downloaded is kept, and running the command again resumes it. (Ctrl+C again stops at once.)");
-                if tokio::signal::ctrl_c().await.is_ok() {
+            while tokio::signal::ctrl_c().await.is_ok() {
+                if !DOWNLOADING.load(Ordering::SeqCst) || CANCEL.swap(true, Ordering::SeqCst) {
                     std::process::exit(130);
                 }
+                eprintln!("\nStopping: what was downloaded is kept, and running the command again resumes it. (Ctrl+C again stops at once.)");
             }
         });
     });
+}
+
+/// Whether a start to serve with models missing may ask, in the terminal, to download them (user, 2026-10-28): only
+/// when a person started the server by hand in a terminal, that is when its input, its output and its error output
+/// are all terminals, and never with `--no-prompt`. The plugin starts the server with its input ignored and its output
+/// piped (app.rs, spawn_server), so a start from Obsidian is never asked and never downloads.
+pub fn may_ask(stdin_terminal: bool, stdout_terminal: bool, stderr_terminal: bool, no_prompt: bool) -> bool {
+    stdin_terminal && stdout_terminal && stderr_terminal && !no_prompt
+}
+
+/// The answer to `Download them now? [y/N]`: "y" or "yes" in any case, spaces around allowed; anything else, an empty
+/// line or the end of the input, is no.
+pub fn accepts(answer: &str) -> bool {
+    matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+}
+
+/// The command that downloads the missing models later, as the user would type it: this program, `--download all`,
+/// then the arguments this run was given (so it downloads what this run needs: `--phrases`, `--model` …). On Windows,
+/// PowerShell's call operator `&` runs a quoted path.
+pub fn later_command(program: &str, args: &[String], windows: bool) -> String {
+    let quote = |s: &str| if s.is_empty() || s.contains([' ', '\'']) { format!("\"{s}\"") } else { s.to_string() };
+    let mut c = format!("{}\"{program}\" --download all", if windows { "& " } else { "" });
+    for a in args.iter().filter(|a| *a != "--no-prompt") {
+        c.push(' ');
+        c.push_str(&quote(a));
+    }
+    c
+}
+
+/// The terminal's question: the missing models listed (each one's size, page and licence), their total, the folder
+/// they go in, then `Download them now? [y/N]`. True on a yes.
+pub fn ask(lacking: &[Value], total: u64, folder: &Path) -> bool {
+    println!("Augmented View's server needs these models, which are not on this computer yet:");
+    for m in lacking {
+        let bytes = m["missing_bytes"].as_u64().unwrap_or(0);
+        let size = if bytes > 0 { gb(bytes) } else { "size listed when downloaded".into() };
+        println!("  - {} ({}): {}", m["name"].as_str().unwrap_or("?"), size, m["purpose"].as_str().unwrap_or(""));
+        println!("      page {}  licence {} ({})", m["page"].as_str().unwrap_or(""), m["licence"].as_str().unwrap_or(""), m["licence_url"].as_str().unwrap_or(""));
+        println!("      into {}", m["folder"].as_str().unwrap_or(""));
+    }
+    println!("In all about {}, from Hugging Face (huggingface.co) and LINDAT (lindat.mff.cuni.cz), into {}.", gb(total), folder.display());
+    println!("Each file is checked against its published size and checksum; Ctrl+C stops, and running again resumes.");
+    print!("Download them now? [y/N] ");
+    _ = std::io::stdout().flush();
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer).is_ok() && accepts(&answer)
 }
 
 /// The download-only run (`--download <ids|all>`), which the user runs in a terminal: the chosen models' missing
 /// files, fetched one by one with the progress on the terminal, then the run exits (0 done, 1 failed, 2 a wrong id,
 /// 130 stopped with Ctrl+C).
 pub fn download_only(n: &Needs, ids: &str) -> ! {
-    let models = chosen(n, ids).unwrap_or_else(|e| {
-        eprintln!("{e}");
-        std::process::exit(2)
-    });
+    std::process::exit(download(n, ids, false))
+}
+
+/// The chosen models' missing files, fetched one by one with the progress on the terminal; the exit code of the run
+/// (0 done, 1 failed, 2 a wrong id, 130 stopped with Ctrl+C). `then_serve`: the user said yes to the terminal's
+/// question, and the server starts once the files are here.
+pub fn download(n: &Needs, ids: &str, then_serve: bool) -> i32 {
+    let models = match chosen(n, ids) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("{e}");
+            return 2;
+        }
+    };
     on_ctrl_c();
+    DOWNLOADING.store(true, Ordering::SeqCst);
+    let code = fetch_all(n, &models, then_serve);
+    DOWNLOADING.store(false, Ordering::SeqCst);
+    code
+}
+
+fn fetch_all(n: &Needs, models: &[Model], then_serve: bool) -> i32 {
     let agent = download::agent();
     // the files to fetch: a model set by hand is listed from the Hub's API first
     let mut todo: Vec<(Model, FileSpec, String)> = Vec::new();
-    for m in &models {
+    for m in models {
         let st = standing(m, &n.cache);
         if st.ready {
             continue;
@@ -384,10 +454,13 @@ pub fn download_only(n: &Needs, ids: &str) -> ! {
                 let files: Vec<FileSpec> = match &m.files {
                     Some(f) => f.iter().filter(|f| st.files.contains(&f.name)).cloned().collect(),
                     None => {
-                        let listed = download::list_files(&agent, HUB, repo, &wanted(m.id)).unwrap_or_else(|e| {
-                            eprintln!("{e}");
-                            std::process::exit(1)
-                        });
+                        let listed = match download::list_files(&agent, HUB, repo, &wanted(m.id)) {
+                            Ok(l) => l,
+                            Err(e) => {
+                                eprintln!("{e}");
+                                return 1;
+                            }
+                        };
                         let listed = Model { files: Some(listed), ..m.clone() };
                         let st = standing(&listed, &n.cache);
                         listed.files.unwrap_or_default().into_iter().filter(|f| st.files.contains(&f.name)).collect()
@@ -405,7 +478,7 @@ pub fn download_only(n: &Needs, ids: &str) -> ! {
     }
     if todo.is_empty() {
         println!("Every model asked for is on this computer already: nothing to download.");
-        std::process::exit(0);
+        return 0;
     }
     let total: u64 = todo.iter().map(|(_, f, _)| f.bytes).sum();
     let mut names: Vec<&str> = todo.iter().map(|(m, _, _)| m.name.as_str()).collect();
@@ -428,11 +501,11 @@ pub fn download_only(n: &Needs, ids: &str) -> ! {
             Ok(()) => eprintln!(),
             Err(e) if e == download::CANCELLED => {
                 eprintln!("\nStopped. Run the same command again to resume.");
-                std::process::exit(130)
+                return 130;
             }
             Err(e) => {
                 eprintln!("\nThe download stopped: {e}");
-                std::process::exit(1)
+                return 1;
             }
         }
         done_before += f.bytes;
@@ -441,8 +514,12 @@ pub fn download_only(n: &Needs, ids: &str) -> ! {
     if todo.iter().any(|(m, f, _)| m.id == "colours" && f.name.ends_with(".safetensors")) {
         println!("At its first start the server converts {} once into a 2.4 GB 4-bit file (about two minutes) and deletes the official weights it downloaded.", n.claims_model);
     }
-    println!("Start the server from Obsidian: Settings → Augmented View → Models → Check again (or click AugView in the status bar).");
-    std::process::exit(0)
+    if then_serve {
+        println!("Starting the server.");
+    } else {
+        println!("Start the server from Obsidian: Settings → Augmented View → Models → Check again (or click AugView in the status bar).");
+    }
+    0
 }
 
 #[cfg(test)]
@@ -532,5 +609,37 @@ mod tests {
         assert_eq!(ids("").unwrap(), ["parser", "terms", "colours"]);
         assert_eq!(ids("phrases, terms").unwrap(), ["terms", "phrases"]);
         assert!(ids("everything").unwrap_err().contains("parser, terms, colours, phrases"));
+    }
+
+    /// The terminal's question is asked only when input, output and error output are all terminals and `--no-prompt`
+    /// is not given: a start from the plugin (input ignored, output piped) is never asked.
+    #[test]
+    fn the_question_only_in_a_terminal() {
+        assert!(may_ask(true, true, true, false), "a terminal the user opened");
+        assert!(!may_ask(true, true, true, true), "--no-prompt");
+        assert!(!may_ask(false, false, false, false), "the plugin: input ignored, output piped");
+        assert!(!may_ask(false, true, true, false), "input not a terminal (a script, a pipe)");
+        assert!(!may_ask(true, false, true, false), "output redirected to a file");
+        assert!(!may_ask(true, true, false, false), "error output redirected");
+    }
+
+    /// Only "y" or "yes" (any case, spaces around) is a yes; an empty line, the end of the input or anything else is no.
+    #[test]
+    fn only_yes_downloads() {
+        for yes in ["y", "Y", "yes", "YES", "Yes", " y \n", "yes\r\n"] {
+            assert!(accepts(yes), "{yes:?}");
+        }
+        for no in ["", "\n", "n", "no", "N", "yeah", "ye", "yes please", "y y", "1", "ok"] {
+            assert!(!accepts(no), "{no:?}");
+        }
+    }
+
+    /// The command to run later: this program quoted, `--download all`, then this run's own arguments (not
+    /// `--no-prompt`); PowerShell's `&` on Windows.
+    #[test]
+    fn the_command_for_later() {
+        let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(later_command("/opt/av/augmented-view-server", &args(&["--phrases", "--port", "9000"]), false), r#""/opt/av/augmented-view-server" --download all --phrases --port 9000"#);
+        assert_eq!(later_command(r"D:\Apps\AV\augmented-view-server.exe", &args(&["--model", "some one/model", "--no-prompt"]), true), r#"& "D:\Apps\AV\augmented-view-server.exe" --download all --model "some one/model""#);
     }
 }

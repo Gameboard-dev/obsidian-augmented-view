@@ -1,8 +1,8 @@
-//! Phrase colours (COLOUR-CODES.md): spans of the paragraph found for each phrase colour's description by GLiNER2
+//! Phrase colours (docs/colour-codes.md): spans of the paragraph found for each phrase colour's description by GLiNER2
 //! (<https://github.com/fastino-ai/GLiNER2>; the checkpoint fastino/gliner2-base-v1, Apache-2.0),
 //! run by the gliner2 crate (<https://github.com/paul-english/gliner2_rs>, candle, on the CPU: about 2.3 s a paragraph).
 //! Measured against the instruct model choosing a colour for every noun phrase, it found as many of a reader's phrases
-//! (63% against 60%) with nearly three times the precision (41% against 15%; README, "Colours"). Loaded the first time
+//! (63% against 60%) with nearly three times the precision (41% against 15%; docs/models.md). Loaded the first time
 //! a request asks for phrase colours, so a code without them costs nothing.
 
 use gliner2::schema::{EntityTypeConfigInput, EntityTypesInput};

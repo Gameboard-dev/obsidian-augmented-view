@@ -9,7 +9,7 @@
 //!           one per 80 words, so that a short paragraph is not all italic
 //!   quote, definition   every one, whenever the sensitivity is above zero (found by rule, not ranked)
 //!   colour  a sentence's colour (the server's /colours), when the model gave it a probability of at least 1 − s: every
-//!           one at 100%, the surer half or so at 50% (README, "Colours")
+//!           one at 100%, the surer half or so at 50% (docs/models.md)
 
 use serde::{Deserialize, Serialize};
 
