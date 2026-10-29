@@ -63,6 +63,23 @@ jobs:
           rustup default stable
           cargo install wasm-bindgen-cli --version "$WASM_BINDGEN" --locked
 
+      # The workspace lists its members by glob ("*/core", "*/schema", ...) for whichever plugins are checked out beside
+      # it; here only this plugin is, and Cargo reads a glob that matches nothing as a literal path and fails. So the
+      # members are narrowed to the globs that match something in this checkout.
+      - name: Only the workspace members present here
+        working-directory: workspace
+        run: |
+          python3 - <<'PY'
+          import glob, re
+          s = open("Cargo.toml", encoding="utf-8").read()
+          m = re.search(r'^members\s*=\s*\[(.*?)\]', s, re.M | re.S)
+          names = re.findall(r'"([^"]+)"', m.group(1))
+          kept = [n for n in names if glob.glob(n + "/Cargo.toml")]
+          s = s[:m.start(1)] + ", ".join('"%s"' % n for n in kept) + s[m.end(1):]
+          open("Cargo.toml", "w", encoding="utf-8").write(s)
+          print("members:", kept)
+          PY
+
       - name: The plugin's tests
         working-directory: workspace
         run: cargo test --release -p augmented-view-core
@@ -115,7 +132,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
-          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag \
-            --title "Augmented View $GITHUB_REF_NAME" \
-            --notes-file "workspace/augmented-view/.github/release-notes/$GITHUB_REF_NAME.md" \
-            "$RUNNER_TEMP/release/main.js" "$RUNNER_TEMP/release/manifest.json" "$RUNNER_TEMP/release/styles.css"
+          files="$RUNNER_TEMP/release/main.js $RUNNER_TEMP/release/manifest.json $RUNNER_TEMP/release/styles.css"
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            # published by hand while Actions could not run: its files are replaced by these attested ones
+            gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --clobber $files
+          else
+            gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag \
+              --title "Augmented View $GITHUB_REF_NAME" \
+              --notes-file "workspace/augmented-view/.github/release-notes/$GITHUB_REF_NAME.md" $files
+          fi
