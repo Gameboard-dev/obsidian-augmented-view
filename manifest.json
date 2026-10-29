@@ -1,7 +1,7 @@
 {
   "id": "augmented-view",
   "name": "Augmented View",
-  "version": "0.6.5",
+  "version": "0.6.6",
   "minAppVersion": "1.8.7",
   "description": "Colour each sentence of a note by the role it plays, such as claim, finding or limitation, and key phrases by kind, for skim reading. Local models on your own computer do the work, and the note itself is never changed.",
   "author": "Gameboard-dev",

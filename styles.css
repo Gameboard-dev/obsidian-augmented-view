@@ -1,10 +1,10 @@
 /* The marks are tints behind the text, in the colours of the colour code: the stylesheet is generated from the settings
-   (colours.rs) into <style id="augmented-view-colours">. Bold, italics and underlines are left to the writer. A phrase
-   colour's tint keeps its padding on every line a mark wraps over (box-decoration-break, unprefixed in Chromium 130 and
-   later: Obsidian 1.8's Electron 34 has Chromium 132; an older one draws a wrapped mark without the padding at the break). */
+   (colours.rs) into <style id="augmented-view-colours">. Bold, italics and underlines are left to the writer. A mark that
+   wraps over a line break keeps square corners at the break: box-decoration-break, which would round them too, is not
+   used, as Obsidian's review reads it as only partly supported (the marks have no padding or border, so nothing else
+   changes at a break). */
 .av {
   border-radius: 2px;
-  box-decoration-break: clone;
 }
 
 /* A colour's row in the settings: its name, what it marks, then its controls, wrapping on a narrow pane. */

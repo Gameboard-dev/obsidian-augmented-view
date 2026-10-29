@@ -1,6 +1,6 @@
 [package]
 name = "augmented-view-core"
-version = "0.6.5"
+version = "0.6.6"
 edition = "2021"
 description = "Augmented View, an Obsidian plugin in Rust: WebAssembly on the main thread (Obsidian, CodeMirror) and in a worker (the engine)"
 publish = false
