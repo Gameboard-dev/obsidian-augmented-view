@@ -3,130 +3,25 @@
 //! interrupts is found by its first and last few words instead. The result is a list of segments, each with the kinds
 //! over it as a bit mask, so overlapping kinds become one wrapper with several classes.
 
+pub use view_marks::locate::{plain_words, segments};
+use view_marks::locate::Norm;
+
 use crate::pick::Span;
-
-/// A block's text with runs of white space collapsed, and where each kept character sits in the original (UTF-16).
-struct Norm {
-    chars: Vec<char>,
-    lower: Vec<char>,
-    start16: Vec<u32>,
-    end16: Vec<u32>,
-}
-
-fn normalize(s: &str) -> Norm {
-    let mut n = Norm { chars: Vec::new(), lower: Vec::new(), start16: Vec::new(), end16: Vec::new() };
-    let mut pos = 0u32;
-    let mut space = true; // drop leading white space
-    for c in s.chars() {
-        let w = c.len_utf16() as u32;
-        if c.is_whitespace() {
-            if !space {
-                n.chars.push(' ');
-                n.lower.push(' ');
-                n.start16.push(pos);
-                n.end16.push(pos + w);
-            }
-            space = true;
-        } else {
-            n.chars.push(c);
-            n.lower.push(c.to_lowercase().next().unwrap_or(c));
-            n.start16.push(pos);
-            n.end16.push(pos + w);
-            space = false;
-        }
-        pos += w;
-    }
-    while n.chars.last() == Some(&' ') {
-        n.chars.pop();
-        n.lower.pop();
-        n.start16.pop();
-        n.end16.pop();
-    }
-    n
-}
-
-fn find(hay: &[char], needle: &[char], from: usize) -> Option<usize> {
-    if needle.is_empty() || needle.len() > hay.len() {
-        return None;
-    }
-    (from..=hay.len() - needle.len()).find(|&i| hay[i..i + needle.len()] == *needle)
-}
-
-/// Where `needle` sits in the block, from character `from`: exact, then ignoring case, then by its first and last
-/// three words (for long spans). Returns the [start, end) character range.
-fn locate(block: &Norm, needle: &Norm, from: usize) -> Option<(usize, usize)> {
-    if let Some(i) = find(&block.chars, &needle.chars, from) {
-        return Some((i, i + needle.chars.len()));
-    }
-    if let Some(i) = find(&block.lower, &needle.lower, from) {
-        return Some((i, i + needle.chars.len()));
-    }
-    let words: Vec<&[char]> = needle.lower.split(|&c| c == ' ').filter(|w| !w.is_empty()).collect();
-    if words.len() < 6 {
-        return None;
-    }
-    let head: Vec<char> = words[..3].join(&' ');
-    let tail: Vec<char> = words[words.len() - 3..].join(&' ');
-    let a = find(&block.lower, &head, from)?;
-    let b = find(&block.lower, &tail, a + head.len())?;
-    let end = b + tail.len();
-    (end - a <= needle.chars.len() * 2 + 40).then_some((a, end))
-}
 
 /// The segments to wrap in a rendered block: (start16, end16, mask of kinds), sorted, not overlapping. `found`: ranges
 /// the worker found in the block itself, with their kinds (the user's own terms, bold::block_ranges; citations,
 /// rules.rs); `rules`: the kinds that cut a
 /// sentence's colour (pick::cut).
 pub fn block_segments(block: &str, spans: &[&Span], chosen: &[(usize, bool)], found: &[(u32, u32, u8)], rules: u32) -> Vec<(u32, u32, u32)> {
-    let b = normalize(block);
+    let b = Norm::new(block);
     let mut ranges: Vec<(u32, u32, u8)> = found.to_vec();
     for &(i, every) in chosen {
         let sp = spans[i];
-        let n = normalize(&sp.v);
-        let mut from = 0;
-        while let Some((a, e)) = locate(&b, &n, from) {
-            if e == 0 || e > b.chars.len() {
-                break;
-            }
-            ranges.push((b.start16[a], b.end16[e - 1], sp.k));
-            if !every {
-                break;
-            }
-            from = e;
-        }
+        ranges.extend(b.find_all(&sp.v, every).into_iter().map(|(a, e)| (a, e, sp.k)));
     }
     crate::pick::tidy(&mut ranges);
     crate::pick::cut(&mut ranges, rules);
     segments(&ranges)
-}
-
-/// Overlapping ranges of different kinds become segments carrying every kind over them.
-pub fn segments(ranges: &[(u32, u32, u8)]) -> Vec<(u32, u32, u32)> {
-    let mut cuts: Vec<u32> = ranges.iter().flat_map(|&(a, e, _)| [a, e]).collect();
-    cuts.sort_unstable();
-    cuts.dedup();
-    let mut out: Vec<(u32, u32, u32)> = Vec::new();
-    for w in cuts.windows(2) {
-        let (a, e) = (w[0], w[1]);
-        let mask = ranges.iter().filter(|&&(s, t, _)| s <= a && t >= e).fold(0u32, |m, &(_, _, k)| m | (1 << k));
-        if mask == 0 {
-            continue;
-        }
-        match out.last_mut() {
-            Some(last) if last.1 == a && last.2 == mask => last.1 = e,
-            _ => out.push((a, e, mask)),
-        }
-    }
-    out
-}
-
-/// Lower-case words of a text with markup characters dropped, to tell which source paragraph a rendered block shows.
-pub fn plain_words(s: &str, n: usize) -> Vec<String> {
-    s.split(|c: char| !c.is_alphanumeric() && c != '\'')
-        .filter(|w| !w.is_empty())
-        .take(n)
-        .map(str::to_lowercase)
-        .collect()
 }
 
 #[cfg(test)]

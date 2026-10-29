@@ -44,7 +44,7 @@ pub struct Settings {
     pub colour_codes: Vec<crate::colours::ColourCode>,
     /// Which code applies to which notes and folders (colours::assigned).
     pub links: Vec<crate::colours::Link>,
-    /// "Copy with Augmented View highlights" in the editor's context menu (highlights.rs; docs/colour-codes.md): shown
+    /// "Copy with Augmented View highlights" in the editor's context menu (view-marks' highlights.rs; docs/colour-codes.md): shown
     /// by default; the command is there either way.
     pub highlight_menu: bool,
     /// The markers: "tilde" (`~={colour, category}text=~`) or "html" (`<mark data-colour data-category>`).

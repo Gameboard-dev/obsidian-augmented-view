@@ -37,7 +37,8 @@ use crate::msg::{FromWorker, Settings, ToWorker};
 use crate::pick::{self, Span};
 use crate::reading;
 use crate::rules;
-use crate::split::{split, Para};
+use crate::split::Para;
+use view_marks::plan::{self, Doc, Timing, View};
 
 const FAST: usize = 0; // terms, quotations, definitions: /emphasis
 const COLOURS: usize = 1; // each sentence's colour, and contrast words: /colours
@@ -49,6 +50,7 @@ const QUIET_MS: f64 = 1500.0;
 const SETTLE_MS: f64 = 150.0;
 const PREFETCH_MS: f64 = 1000.0;
 const PREFETCH_BATCH: usize = 2;
+const TIMING: Timing = Timing { settle_ms: SETTLE_MS, prefetch_ms: PREFETCH_MS, quiet_ms: QUIET_MS };
 /// A cache file's layer as read, kept until the models are known: the key it was made with, and its entries.
 type Carry = Option<(String, Vec<(u64, Vec<Span>)>)>;
 
@@ -59,7 +61,7 @@ const SHARED_MAX: usize = 20_000; // results kept per layer: a few MB of spans
 /// Failed requests in a row after which a copy stops waiting and is made with the colours there are.
 const COPY_GIVE_UP: u32 = 4;
 
-/// A selection being copied with its highlights (highlights.rs): [from, to) in the note's UTF-16 offsets, made once
+/// A selection being copied with its highlights (view-marks' highlights.rs): [from, to) in the note's UTF-16 offsets, made once
 /// every paragraph it touches has its results, or when told to finish now.
 struct CopyJob {
     path: String,
@@ -82,13 +84,10 @@ struct Shared {
     dirty: bool,
 }
 
+/// An open note: its text and paragraphs (view-marks' `Doc`, reached through `Deref`), and each layer's results.
 #[derive(Default)]
 struct Note {
-    text: String,
-    version: u32,
-    paras: Vec<Para>,
-    ids: HashSet<u64>,
-    born: HashMap<u64, f64>, // paragraphs that appeared since the note was opened: when
+    doc: Doc,
     /// What the colours layer is asked with for this note (Engine::code_key; 0: nothing to ask), and the ids its
     /// paragraphs' results are kept under in that layer.
     code: u64,
@@ -101,18 +100,22 @@ struct Note {
     touched: u64,
 }
 
+impl std::ops::Deref for Note {
+    type Target = Doc;
+    fn deref(&self) -> &Doc {
+        &self.doc
+    }
+}
+
+impl std::ops::DerefMut for Note {
+    fn deref_mut(&mut self) -> &mut Doc {
+        &mut self.doc
+    }
+}
+
 impl Note {
     fn set_text(&mut self, text: String, now: f64, fresh: bool) {
-        self.paras = split(&text);
-        let ids: HashSet<u64> = self.paras.iter().map(|p| p.id).collect();
-        if fresh {
-            for id in ids.difference(&self.ids) {
-                self.born.insert(*id, now);
-            }
-        }
-        self.born.retain(|id, t| ids.contains(id) && now - *t < QUIET_MS);
-        self.ids = ids;
-        self.text = text;
+        self.doc.set_text(text, now, fresh, QUIET_MS);
         self.keep();
     }
 
@@ -127,44 +130,15 @@ impl Note {
 
     /// After the paragraphs or the code changed: the colours layer's ids, and only the current paragraphs' results.
     fn keep(&mut self) {
-        self.lids = self.ids.iter().map(|&id| self.lid(COLOURS, id)).collect();
-        let (ids, lids) = (&self.ids, &self.lids);
+        self.lids = self.doc.ids.iter().map(|&id| self.lid(COLOURS, id)).collect();
+        let (ids, lids) = (&self.doc.ids, &self.lids);
         self.layers[FAST].retain(|id, _| ids.contains(id)); // results of paragraphs edited away
         self.layers[COLOURS].retain(|id, _| lids.contains(id));
-    }
-
-    /// Indices of the paragraphs overlapping [from, to] in UTF-16 offsets.
-    fn paras_in(&self, from: u32, to: u32) -> std::ops::Range<usize> {
-        let a = self.paras.partition_point(|p| p.to16 < from);
-        a..self.paras.partition_point(|p| p.from16 <= to).max(a)
-    }
-
-    /// The lines a view's visible offsets cover (the nearest paragraph's when they fall between paragraphs).
-    fn lines_of(&self, (from, to): (u32, u32)) -> (u32, u32) {
-        let r = self.paras_in(from, to);
-        let (a, b) = if r.is_empty() { (r.start.min(self.paras.len().saturating_sub(1)), r.start) } else { (r.start, r.end - 1) };
-        match (self.paras.get(a), self.paras.get(b.min(self.paras.len().saturating_sub(1)))) {
-            (Some(p), Some(q)) => (p.line_from, q.line_to),
-            _ => (0, 0),
-        }
     }
 
     fn spans(&self, id: u64) -> Vec<&Span> {
         self.layers.iter().enumerate().filter_map(|(layer, l)| l.get(&self.lid(layer, id))).flatten().collect()
     }
-
-    fn para_text(&self, p: &Para) -> &str {
-        &self.text[p.start..p.end]
-    }
-}
-
-struct View {
-    path: String,
-    editor: bool,
-    vis: (u32, u32),
-    render: (u32, u32),
-    /// When `vis` last changed.
-    moved: f64,
 }
 
 struct Block {
@@ -309,8 +283,8 @@ impl Engine {
                 if editor {
                     self.dirty_views.insert(id);
                 }
-                let moved = self.views.get(&id).filter(|v| v.path == path && v.vis == vis).map_or(now, |v| v.moved);
-                self.views.insert(id, View { path, editor, vis, render, moved });
+                let v = View::new(self.views.get(&id), path, editor, vis, render, now);
+                self.views.insert(id, v);
             }
             ToWorker::DropView(id) => {
                 self.views.remove(&id);
@@ -409,7 +383,7 @@ impl Engine {
         out
     }
 
-    /// A selection's text with its colours as markers (highlights.rs): the marks the editor draws, at the same
+    /// A selection's text with its colours as markers (view-marks' highlights.rs): the marks the editor draws, at the same
     /// sensitivity, with the same code and rules (also while emphasis is hidden), sentences' colours and, if the
     /// settings say so, phrases'; and the number of markers.
     fn copy_text(&self, path: &str, note: &Note, from: u32, to: u32) -> (String, usize) {
@@ -470,7 +444,7 @@ impl Engine {
     pub fn wait_ms(&self, now: f64) -> f64 {
         let paused = (0..2).filter(|&l| !self.busy[l]).map(|l| self.pause_until[l] - now);
         let quiet = self.notes.values().flat_map(|n| n.born.values()).map(|t| t + QUIET_MS - now);
-        let rest = self.views.values().flat_map(|v| [v.moved + SETTLE_MS - now, v.moved + PREFETCH_MS - now]);
+        let rest = self.views.values().flat_map(|v| v.rests(now, &TIMING));
         let next = paused.chain(quiet).chain(rest).filter(|w| *w > 0.0).fold(f64::INFINITY, f64::min);
         if next.is_finite() { next } else { 0.0 }
     }
@@ -613,25 +587,12 @@ impl Engine {
             }
         }
         for v in self.views.values().filter(|_| self.settings.enabled) {
-            let rested = now - v.moved;
-            if rested < SETTLE_MS {
-                continue;
-            }
-            let reach = if rested < PREFETCH_MS { 0 } else { self.settings.context_paragraphs };
             let Some(note) = self.notes.get(&v.path).filter(|n| n.loaded) else { continue }; // its cache file first
-            let (lf, lt) = if v.editor { note.lines_of(v.vis) } else { v.vis };
-            // the paragraphs on screen, by index: those before the first that reaches the view, after the last that starts in it
-            let first = note.paras.iter().position(|p| p.line_to >= lf).unwrap_or(note.paras.len());
-            let last = note.paras.iter().rposition(|p| p.line_from <= lt).unwrap_or(0);
-            for (i, p) in note.paras.iter().enumerate() {
-                let dist = (first.saturating_sub(i)).max(i.saturating_sub(last)) as u32;
+            // on screen once the view rests, the context paragraphs once it has rested longer, none still quiet
+            for (dist, i) in plan::around(&note.doc, v, now, self.settings.context_paragraphs, &TIMING) {
+                let p = &note.paras[i];
                 let lid = note.lid(layer, p.id);
-                if dist > reach
-                    || (layer == COLOURS && note.code == 0)
-                    || note.layers[layer].contains_key(&lid)
-                    || self.inflight[layer].contains(&lid)
-                    || note.born.get(&p.id).is_some_and(|t| now - t < QUIET_MS)
-                {
+                if (layer == COLOURS && note.code == 0) || note.layers[layer].contains_key(&lid) || self.inflight[layer].contains(&lid) {
                     continue;
                 }
                 let e = best.entry(p.id).or_insert((u32::MAX, &v.path, i));
@@ -794,7 +755,7 @@ impl Engine {
         for (path, note) in self.notes.iter_mut().filter(|(_, n)| n.loaded) {
             let mut got = false;
             for layer in 0..2 {
-                for p in &note.paras {
+                for p in &note.doc.paras {
                     let lid = note.lid(layer, p.id);
                     if !note.layers[layer].contains_key(&lid) {
                         if let Some(spans) = self.shared.layers[layer].get(&lid) {
@@ -1369,5 +1330,85 @@ mod tests {
         let cited = "The second paragraph, with a link [@a2020, p. 3].";
         e.handle(ToWorker::Block { id: 9, path: "a.md".into(), lines: Some((2, 2)), idx: 0, n: 1, text: cited.into() }, 0.0);
         assert_eq!(e.wrap(9), vec![(4, 10, 1), (34, 48, 1 << pick::CITATION)]);
+    }
+
+    /// The worker's cost per viewport render on a long note (docs/performance.md): a 5,000-paragraph note whose
+    /// paragraphs all have results, an editor scrolled one screen at a time (the plan, then the marks of its rendered
+    /// range), a Reading-view block mapped and wrapped, a paragraph edited (split and hash), and a long selection copied
+    /// with its highlights. Not a check: run it by hand, natively, with
+    /// `cargo test --release -p augmented-view-core bench_viewport -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn bench_viewport() {
+        use std::time::Instant;
+        let mut e = engine(1);
+        let para = |i: usize| format!("Paragraph {i} says that \"detectors\" fail on new data [@key{i}, p. 3], whereas they work at home; see [[note {i}|a link]] and `code` here. A second sentence follows it, with more words in it.");
+        let text: String = (0..5000).map(para).collect::<Vec<_>>().join("\n\n");
+        let mut s = Settings { context_paragraphs: 1, points: false, ..Default::default() };
+        s.colour_codes = colours::defaults();
+        s.links = vec![colours::Link { path: "a.md".into(), code: "reading".into() }];
+        e.handle(ToWorker::Settings(s), 0.0);
+        answer_shared(&mut e, None);
+        open(&mut e, "a.md", &text, None);
+        let ids: Vec<u64> = e.notes["a.md"].paras.iter().map(|p| p.id).collect();
+        for id in ids {
+            let sp = |k, a, b, v: &str| Span { k, w: 0.9, at: vec![(a, b)], v: v.into() };
+            e.store(FAST, id, vec![sp(pick::TERM, 25, 34, "detectors"), sp(pick::QUOTE, 24, 35, "\"detectors\""), sp(pick::TERM, 40, 48, "new data")]);
+        }
+        e.outbox(0.0);
+        let paras = e.notes["a.md"].paras.clone();
+        let median = |mut v: Vec<f64>| {
+            v.sort_by(f64::total_cmp);
+            v[v.len() / 2]
+        };
+        // a screen: 12 paragraphs visible, 40 rendered
+        let mut times = Vec::new();
+        let mut marks = 0;
+        for k in 0..200 {
+            let at = 1000 + k * 12;
+            let (vis, render) = ((paras[at].from16, paras[at + 12].to16), (paras[at - 14].from16, paras[at + 26].to16));
+            let t = Instant::now();
+            e.handle(ToWorker::View { id: 1, path: "a.md".into(), editor: true, vis, render }, 0.0);
+            for m in e.outbox(10_000.0) {
+                if let FromWorker::Marks { marks: m, .. } = m {
+                    marks = m.len();
+                }
+            }
+            times.push(t.elapsed().as_secs_f64() * 1e6);
+        }
+        println!("viewport render (plan + marks of 40 paragraphs, {marks} marks): median {:.1} µs", median(times));
+        let block = "Paragraph 1500 says that \"detectors\" fail on new data [@key1500, p. 3], whereas they work at home; see a link and code here. A second sentence follows it, with more words in it.";
+        let mut times = Vec::new();
+        for k in 0..200 {
+            let t = Instant::now();
+            e.handle(ToWorker::Block { id: 100 + k, path: "a.md".into(), lines: Some((3000, 3000)), idx: 0, n: 1, text: block.into() }, 0.0);
+            e.outbox(10_000.0);
+            times.push(t.elapsed().as_secs_f64() * 1e6);
+        }
+        println!("Reading-view block (map + wrap): median {:.1} µs", median(times));
+        let mut times = Vec::new();
+        for k in 0..20 {
+            let edited = text.replacen("Paragraph 2500 says", &format!("Paragraph 2500 now {k} says"), 1);
+            let t = Instant::now();
+            e.handle(ToWorker::Doc { path: "a.md".into(), version: 2 + k, text: edited }, 0.0);
+            times.push(t.elapsed().as_secs_f64() * 1e3);
+        }
+        println!("an edit (split and hash {} paragraphs): median {:.2} ms", paras.len(), median(times));
+        e.handle(ToWorker::Doc { path: "a.md".into(), version: 100, text: text.clone() }, 0.0);
+        e.outbox(10_000.0);
+        let (from, to) = (paras[1000].from16, paras[1400].to16);
+        let mut times = Vec::new();
+        let mut size = 0;
+        for k in 0..20 {
+            e.handle(ToWorker::Copy { req: 1000 + k, path: "a.md".into(), from, to }, 0.0);
+            let t = Instant::now();
+            for m in e.outbox(10_000.0) {
+                if let FromWorker::Copied { text, .. } = m {
+                    size = text.len();
+                }
+            }
+            times.push(t.elapsed().as_secs_f64() * 1e3);
+        }
+        println!("copy with highlights (400 paragraphs, {size} bytes out): median {:.2} ms", median(times));
     }
 }

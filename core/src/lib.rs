@@ -1,5 +1,6 @@
 //! Augmented View: an Obsidian plugin in Rust. main.js (the only JavaScript, a few lines) loads this module and calls
-//! `start` on Obsidian's main thread, which drives Obsidian and CodeMirror (app, editor, view); the same module runs a
+//! `start` on Obsidian's main thread, which drives Obsidian and CodeMirror (app; the editor and Reading view are
+//! view-marks'); the same module runs a
 //! second time in a Web Worker (`worker_start`), where the engine does everything that costs time, so nothing
 //! competes with Obsidian's rendering. The two exchange postcard messages (msg).
 //!
@@ -7,14 +8,14 @@
 //! (<https://developer.mozilla.org/en-US/docs/Web/API/Web_Workers_API/Transferable_objects>).
 
 pub use obsidian_kit::js; // shared with the other plugins (../../shared)
+// the paragraphs, the marks in the editor and Reading view, and copying with highlights (../../view-marks)
+use view_marks::{highlights, split};
 
 mod app;
 mod bold;
 mod cache;
 mod colours;
-mod editor;
 mod engine;
-mod highlights;
 mod key;
 mod models;
 mod msg;
@@ -22,8 +23,6 @@ mod pick;
 mod reading;
 mod rules;
 mod rules_tab;
-mod split;
-mod view;
 
 use std::cell::RefCell;
 

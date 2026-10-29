@@ -12,12 +12,11 @@ use std::rc::Rc;
 use js_sys::{Array, Function, Uint8Array, JSON};
 use wasm_bindgen::prelude::*;
 
-use crate::editor::Ed;
 use obsidian_kit::settings::{Ctl, Row};
 
 use crate::js::{self, call, f0, f1, f2, f3, get, new, obj, set, str};
 use crate::msg::{self, FromWorker, Local, Settings, ToWorker};
-use crate::view::Reading;
+use view_marks::{copy, editor, reading, style, Event, Host, Mark, Marks, Seg};
 
 const LOCAL_KEY: &str = "augmented-view"; // this device's settings (msg::Local)
 const CANNOT_START: &str = "this device cannot start the server: set Server address (Settings, This device) to one running elsewhere";
@@ -38,8 +37,6 @@ pub enum State {
 pub struct App {
     pub plugin: JsValue,
     pub obs: JsValue,
-    pub cmv: JsValue,
-    pub cms: JsValue,
     require: Function,
     pub(crate) vault: JsValue,
     pub(crate) adapter: JsValue,
@@ -74,12 +71,11 @@ pub struct App {
     missing: Option<serde_json::Value>,
     told: String,
     status: JsValue,
-    pub editors: HashMap<u32, Ed>,
-    pub reading: Reading,
-    pub marks: Vec<JsValue>,
-    pub refresh: JsValue,
+    /// The marks in editors and Reading views (view-marks).
+    pub marks: Marks,
     docs: HashSet<String>,
     version: u32,
+    /// The next copy's request (copies).
     pub next_id: u32,
     aborts: HashMap<u32, JsValue>,
     persist: Option<f64>,
@@ -91,7 +87,7 @@ pub struct App {
     /// The settings' Rules section (rules_tab.rs): the code it shows, and the sentence in its test box.
     pub(crate) rules_code: usize,
     pub(crate) rules_test: String,
-    /// Selections the worker is copying with their highlights (highlights.rs), by request: the note's path.
+    /// Selections the worker is copying with their highlights (view-marks' highlights.rs), by request: the note's path.
     copies: HashMap<u32, String>,
 }
 
@@ -117,12 +113,9 @@ impl Handle {
         let child = with(|a| {
             a.aborts.values().for_each(|c| _ = call!(c, abort));
             call!(a.worker, terminate);
-            a.reading.clear();
+            a.marks.clear();
             a.drop_key();
-            let style = call!(get(&js::global(), "document"), getElementById, STYLE_ID);
-            if !style.is_null() {
-                call!(style, remove);
-            }
+            style::remove_stylesheet(STYLE_ID);
             a.child.take()
         });
         if let Some(Some(c)) = child {
@@ -138,7 +131,6 @@ pub fn start(plugin: JsValue, obs: JsValue, require: Function, module: JsValue, 
     let req = |m: &str| require.call1(&JsValue::NULL, &m.into()).unwrap_or(JsValue::UNDEFINED);
     let (cmv, cms) = (req("@codemirror/view"), req("@codemirror/state"));
     let vault = get(&get(&plugin, "app"), "vault");
-    let decoration = get(&cmv, "Decoration");
     // Starting a process needs Node's child_process and a vault on disk (desktop Obsidian); a browser or phone has neither.
     let spawn = get(&req("child_process"), "spawn");
     let local = call!(get(&plugin, "app"), loadLocalStorage, LOCAL_KEY);
@@ -158,9 +150,12 @@ pub fn start(plugin: JsValue, obs: JsValue, require: Function, module: JsValue, 
         polling: false,
         noticed: 0.0,
         worker: spawn_worker(&glue, &module),
-        marks: (0..crate::pick::KINDS as u8).map(|k| call!(decoration, mark, obj! { class: format!("av {}", crate::pick::class(k)) })).collect(),
-        refresh: call!(get(&cms, "StateEffect"), define),
-        reading: Reading::new(),
+        // a mark of kind k has the classes "av" and pick::class(k); notes carry their code in data-av-code
+        marks: Marks::new::<App>(obs.clone(), cmv, cms, view_marks::Config {
+            base: "av".into(),
+            attr: "data-av-code".into(),
+            classes: (0..crate::pick::KINDS as u8).map(crate::pick::class).collect(),
+        }),
         settings: Settings::default(),
         state: State::Stopped,
         detail: String::new(),
@@ -173,7 +168,6 @@ pub fn start(plugin: JsValue, obs: JsValue, require: Function, module: JsValue, 
         missing: None,
         told: String::new(),
         status: JsValue::UNDEFINED,
-        editors: HashMap::new(),
         docs: HashSet::new(),
         version: 0,
         next_id: 1,
@@ -187,8 +181,6 @@ pub fn start(plugin: JsValue, obs: JsValue, require: Function, module: JsValue, 
         key_folder: false,
         plugin,
         obs,
-        cmv,
-        cms,
         require,
         vault,
     };
@@ -245,8 +237,11 @@ fn spawn_worker(glue: &str, module: &JsValue) -> JsValue {
 fn on_worker(data: &JsValue) {
     let Some(m) = msg::decode::<FromWorker>(&Uint8Array::new(data).to_vec()) else { return };
     match m {
-        FromWorker::Marks { view, version, marks } => crate::editor::apply(view, version, &marks),
-        FromWorker::Wrap { block, segs } => _ = with(|a| a.reading.queue(block, segs)),
+        FromWorker::Marks { view, version, marks } => {
+            let marks: Vec<Mark> = marks.into_iter().map(|(a, e, k)| Mark::new(a, e, k)).collect();
+            editor::apply::<App>(view, version, &marks);
+        }
+        FromWorker::Wrap { block, segs } => _ = with(|a| reading::queue(a, block, segs.into_iter().map(Seg::from).collect())),
         FromWorker::Fetch { req, endpoint, body, paras } => js::spawn(fetch(req, endpoint, body, paras)),
         FromWorker::Load { path, file } => js::spawn(load(path, file)),
         FromWorker::Save { file, bytes } => js::spawn(save(file, bytes)),
@@ -261,25 +256,21 @@ fn on_worker(data: &JsValue) {
     }
 }
 
-/// "Copy with Augmented View highlights" (highlights.rs; docs/colour-codes.md): an editor's selection (Live Preview or
+/// "Copy with Augmented View highlights" (view-marks' highlights.rs; docs/colour-codes.md): an editor's selection (Live Preview or
 /// Source mode) with each coloured passage in a marker, to the clipboard. The worker computes first any colours the
 /// selected paragraphs lack, through the server, as the views do. Obsidian's Editor
 /// (<https://docs.obsidian.md/Reference/TypeScript+API/Editor>): getValue, getCursor, posToOffset (UTF-16 offsets, as
 /// the worker's).
 fn copy_from_editor(editor: &JsValue, path: String) {
-    let text = str(&call!(editor, getValue));
-    let at = |which: &str| call!(editor, posToOffset, call!(editor, getCursor, which)).as_f64().unwrap_or(0.0) as u32;
-    let (from, to) = (at("from"), at("to"));
-    if from < to {
+    if let Some((text, from, to)) = copy::selection(editor) {
         with(|a| a.copy_selection(path, text, from, to));
     }
 }
 
 /// Whether an editor (the editor menu's, a command's) has a selection in a note with a colour code, and the note's path.
 fn copyable(editor: &JsValue, info: &JsValue) -> Option<String> {
-    let path = str(&get(&get(info, "file"), "path"));
-    let selected = call!(editor, somethingSelected).is_truthy();
-    (selected && with(|a| a.code_id(&path).is_some()) == Some(true)).then_some(path)
+    let path = copy::path_of(info);
+    (copy::has_selection(editor) && with(|a| a.code_id(&path).is_some()) == Some(true)).then_some(path)
 }
 
 /// The worker's copy, to the clipboard (<https://developer.mozilla.org/en-US/docs/Web/API/Clipboard/writeText>).
@@ -291,9 +282,8 @@ async fn to_clipboard(req: u32, text: String, markers: u32, missing: u32, ok: bo
     if !ok {
         return say("the note was closed before its highlights were ready, so nothing was copied.".into());
     }
-    let clipboard = get(&get(&js::global(), "navigator"), "clipboard");
-    if let Err(e) = js::wait(call!(clipboard, writeText, text)).await {
-        return say(format!("could not copy to the clipboard ({}). Click in the note and try again.", str(&get(&e, "message"))));
+    if let Err(e) = copy::to_clipboard(text).await {
+        return say(format!("could not copy to the clipboard ({e}). Click in the note and try again."));
     }
     let left = match missing {
         0 => String::new(),
@@ -553,17 +543,13 @@ async fn stop_server() {
 /// menu: `editor-menu` (<https://docs.obsidian.md/Reference/TypeScript+API/Workspace/on('editor-menu')>); the selection:
 /// <https://docs.obsidian.md/Reference/TypeScript+API/Editor> (somethingSelected, getSelection).
 fn editor_menu(menu: JsValue, editor: JsValue, view: JsValue) -> JsValue {
-    if !call!(editor, somethingSelected).is_truthy() {
+    if !copy::has_selection(&editor) {
         return JsValue::UNDEFINED;
     }
-    // "Copy with Augmented View highlights" (highlights.rs), unless hidden in the settings: in a note with a colour code
+    // "Copy with Augmented View highlights" (view-marks' highlights.rs), unless hidden in the settings: in a note with a colour code
     if let Some(path) = copyable(&editor, &view).filter(|_| with(|a| a.settings.highlight_menu) == Some(true)) {
         let editor = editor.clone();
-        call!(menu, addItem, f1(move |item| {
-            let (editor, path) = (editor.clone(), path.clone());
-            call!(call!(item, setTitle, "Copy with Augmented View highlights"), setIcon, "clipboard-copy");
-            call!(item, onClick, f0(move || copy_from_editor(&editor, path.clone())))
-        }));
+        copy::menu_item(&menu, "Copy with Augmented View highlights", "clipboard-copy", move || copy_from_editor(&editor, path.clone()));
     }
     if let Some(term) = crate::bold::term(&str(&call!(editor, getSelection))) {
         let listed = with(|a| crate::bold::listed(&a.settings.bold_terms, &term)) == Some(true);
@@ -631,6 +617,38 @@ fn fixed(mut s: Settings) -> Settings {
 }
 /// Where the servers for each kind of computer are published: their own release, apart from the plugin's (docs/installation.md).
 const RELEASES: &str = "https://github.com/Gameboard-dev/obsidian-augmented-view/releases/tag/server-0.6.2";
+
+/// What view-marks needs (its editor and Reading view): the App, a note's colour code as its scope, and the worker.
+impl Host for App {
+    fn with<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
+        with(f)
+    }
+
+    fn marks(&mut self) -> &mut Marks {
+        &mut self.marks
+    }
+
+    fn scope(&self, path: &str) -> Option<String> {
+        self.code_id(path)
+    }
+
+    fn send_doc(&mut self, path: &str, text: String) -> u32 {
+        App::send_doc(self, path, text)
+    }
+
+    fn ensure_doc(&mut self, path: &str) {
+        App::ensure_doc(self, path)
+    }
+
+    fn send(&mut self, event: Event) {
+        self.post(&match event {
+            Event::View { id, path, editor, vis, render } => ToWorker::View { id, path, editor, vis, render },
+            Event::DropView(id) => ToWorker::DropView(id),
+            Event::Block { id, path, lines, idx, n, text } => ToWorker::Block { id, path, lines, idx, n, text },
+            Event::DropBlock(id) => ToWorker::DropBlock(id),
+        });
+    }
+}
 
 impl App {
     /// Whether this device uses a server elsewhere (its Server address, or in Ignis the relay), rather than this
@@ -704,9 +722,9 @@ impl App {
     /// ready (<https://docs.obsidian.md/Reference/TypeScript+API/Workspace/onLayoutReady>).
     fn register(&mut self) {
         let p = self.plugin.clone();
-        call!(p, registerEditorExtension, crate::editor::extension(&self.cmv));
+        call!(p, registerEditorExtension, editor::extension(self));
         call!(p, registerMarkdownPostProcessor, f2(|el, ctx| {
-            with(|a| a.process(el, ctx));
+            with(|a| reading::process(a, el, ctx));
             JsValue::UNDEFINED
         }));
         let on = |event: &str, f: JsValue| _ = call!(p, registerEvent, call!(self.vault, on, event, f));
@@ -756,14 +774,13 @@ impl App {
         command("less", "Less emphasis", f0(|| _ = with(|a| a.nudge(-0.1))));
         // Copy with highlights, for the keyboard: listed while an editor has a selection in a coloured note (an editor
         // check callback, <https://docs.obsidian.md/Reference/TypeScript+API/Command/editorCheckCallback>)
-        let copy_check = f3(|checking, editor, info| {
-            let path = copyable(&editor, &info);
-            if let (Some(p), false) = (&path, checking.is_truthy()) {
-                copy_from_editor(&editor, p.clone());
+        copy::editor_command(&p, "copy-with-highlights", "Copy selection with highlights", |editor, info, checking| {
+            let path = copyable(editor, info);
+            if let (Some(p), false) = (&path, checking) {
+                copy_from_editor(editor, p.clone());
             }
-            path.is_some().into()
+            path.is_some()
         });
-        call!(p, addCommand, obj! { id: "copy-with-highlights", name: "Copy selection with highlights", editorCheckCallback: copy_check });
         call!(p, registerEvent, call!(get(&get(&p, "app"), "workspace"), on, "editor-menu", f3(editor_menu)));
         let workspace = get(&get(&p, "app"), "workspace");
         for event in ["active-leaf-change", "file-open"] {
@@ -846,13 +863,13 @@ impl App {
 
     /// After a link changes: every editor and Reading view takes its note's code (or none), starts or stops sending.
     fn retag(&mut self) {
-        for id in self.editors.keys().copied().collect::<Vec<_>>() {
-            self.tag_editor(id);
+        for id in editor::editor_ids(self) {
+            editor::tag_editor(self, id);
         }
-        let uncoloured: Vec<String> = self.reading.paths().into_iter().filter(|p| self.code_id(p).is_none()).collect();
-        self.reading.tag(|p| self.code_id(p));
+        let uncoloured: Vec<String> = self.marks.reading.paths().into_iter().filter(|p| self.code_id(p).is_none()).collect();
+        self.marks.reading.tag("data-av-code", |p| self.code_id(p));
         for p in uncoloured {
-            self.post(&ToWorker::DropView(crate::view::view_id(&p)));
+            self.post(&ToWorker::DropView(reading::view_id(&p)));
         }
         // Reading views of notes that had no code were never registered: render them again, after this call returns
         // (rendering runs the post-processor, which needs the App).
@@ -862,7 +879,7 @@ impl App {
             .map(|leaf| get(&leaf, "view"))
             .filter(|view| {
                 let path = str(&get(&get(view, "file"), "path"));
-                str(&call!(view, getMode)) == "preview" && self.code_id(&path).is_some() && !self.reading.shows(&path)
+                str(&call!(view, getMode)) == "preview" && self.code_id(&path).is_some() && !self.marks.reading.shows(&path)
             })
             .collect();
         if !stale.is_empty() {
@@ -872,15 +889,7 @@ impl App {
 
     /// The colours' stylesheet in the document's head, written again on every change (colours::stylesheet).
     fn apply_colours(&self) {
-        let doc = get(&js::global(), "document");
-        let mut style = call!(doc, getElementById, STYLE_ID);
-        if style.is_null() {
-            style = call!(doc, createElement, "style");
-            set(&style, "id", STYLE_ID);
-            call!(get(&doc, "head"), appendChild, style.clone());
-        }
-        let css = crate::colours::stylesheet_all(&self.settings.colour_codes);
-        set(&style, "textContent", css);
+        style::set_stylesheet(STYLE_ID, &crate::colours::stylesheet_all(&self.settings.colour_codes));
     }
 
     /// A change to the colour codes: drawn at once and saved; `layout` (a colour or code added or removed) redraws
@@ -954,7 +963,7 @@ impl App {
         self.settings.colour_codes.iter().any(|c| !crate::colours::model_phrases(c).is_empty())
     }
 
-    // ----- copying a selection with its highlights (highlights.rs)
+    // ----- copying a selection with its highlights (view-marks' highlights.rs)
 
     /// The selection [from, to) of `path`, whose text an editor shows (`text`), to the worker, which copies it with its
     /// highlights once its paragraphs' colours are in.
@@ -1625,7 +1634,7 @@ mod tests {
     fn only_the_shown_command_names_download() {
         let flag = concat!("\"--", "download");
         let spawns = concat!("child_", "process");
-        for (name, src) in [("app.rs", include_str!("app.rs")), ("models.rs", include_str!("models.rs")), ("lib.rs", include_str!("lib.rs")), ("engine.rs", include_str!("engine.rs")), ("editor.rs", include_str!("editor.rs")), ("view.rs", include_str!("view.rs")), ("key.rs", include_str!("key.rs")), ("reading.rs", include_str!("reading.rs")), ("cache.rs", include_str!("cache.rs"))] {
+        for (name, src) in [("app.rs", include_str!("app.rs")), ("models.rs", include_str!("models.rs")), ("lib.rs", include_str!("lib.rs")), ("engine.rs", include_str!("engine.rs")), ("view-marks editor.rs", include_str!("../../../view-marks/src/editor.rs")), ("view-marks reading.rs", include_str!("../../../view-marks/src/reading.rs")), ("key.rs", include_str!("key.rs")), ("reading.rs", include_str!("reading.rs")), ("cache.rs", include_str!("cache.rs"))] {
             assert!(!src.contains(flag) || name == "models.rs", "{name} names --download");
             assert!(!src.contains(spawns) || name == "app.rs", "{name} starts a program");
         }

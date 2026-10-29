@@ -27,8 +27,9 @@ jobs:
       id-token: write # the attestations' signing certificate
       attestations: write
     env:
-      # obsidian-cargo-lib's commit the plugin is built with (update it when the workspace changes)
-      CARGO_LIB_COMMIT: 4eb1b32072922b4f0c76a671e552b5b6c5157625
+      # obsidian-cargo-lib's commit the plugin is built with (update it when the workspace changes; after 0.6.4
+      # the plugin depends on its view-marks/, so it must be this commit or a later one)
+      CARGO_LIB_COMMIT: 05c3558c978dd90bac6379d14ea99a88b81dba82
       # must match the wasm-bindgen crate (core/Cargo.toml)
       WASM_BINDGEN: 0.2.129
     steps:

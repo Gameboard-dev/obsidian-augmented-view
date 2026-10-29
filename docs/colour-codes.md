@@ -198,4 +198,4 @@ sentence copies `~={#FFD2D2, Claims}fail on new data.=~ The datasets are small.`
 
 Where a phrase would cross the end of its sentence, it is split there. Where a `~=` marker would touch a `~` or an `=`
 and make `~~` (strikethrough) or `==` (a highlight) that was not in the note, an empty HTML comment, `<!---->`, which
-Obsidian does not show, is put between them. The code is `core/src/highlights.rs`.
+Obsidian does not show, is put between them. The code is `highlights.rs` in the shared crate view-marks ([obsidian-cargo-lib](https://github.com/Gameboard-dev/obsidian-cargo-lib)).

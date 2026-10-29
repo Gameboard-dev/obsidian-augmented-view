@@ -12,6 +12,11 @@
 - **Nothing that costs time runs on Obsidian's main thread.** Splitting, hashing, planning, the protocol, choosing
   spans and Reading-view mapping run in a Web Worker (on a 1.6 MB, 5,000-paragraph note: split and hash 10 ms, plan
   0.4 ms, marks 0.1 ms). The main thread forwards events, makes the requests, reads and writes cache files, and draws.
+  `bench_viewport` (`cargo test --release -p augmented-view-core bench_viewport -- --ignored --nocapture`, native)
+  measures the worker on a 5,000-paragraph note whose paragraphs all have results: a viewport render (the plan, then
+  the marks of 40 rendered paragraphs) about 0.12 ms, a Reading-view block mapped and wrapped 0.07 ms, an edit (split
+  and hash) 1.8 ms, a 400-paragraph selection copied with its highlights 7.5 ms (2026-10-29, before and after the
+  marks moved to the shared crate view-marks: the same within the noise).
 - **The editor never scans the note.** An edit maps the existing marks through the change at once; the text goes to
   the worker only after 400 ms without typing; the visible range at most once a frame; marks come back for the
   editor's rendered range only.

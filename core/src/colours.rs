@@ -241,55 +241,16 @@ pub fn rule_mask(code: &ColourCode) -> u32 {
     [("quote", QUOTE), ("definition", DEFINITION), ("citation", CITATION)].iter().filter(|(k, _)| kinds.contains(k)).fold(0, |m, (_, b)| m | (1 << b))
 }
 
-/// `#RRGGBB` or `#RGB`.
-pub fn rgb(hex: &str) -> Option<(u8, u8, u8)> {
-    let h = hex.trim().trim_start_matches('#');
-    let v = |s: &str| u8::from_str_radix(s, 16).ok();
-    match h.len() {
-        6 => Some((v(&h[0..2])?, v(&h[2..4])?, v(&h[4..6])?)),
-        3 => Some((v(&h[0..1])? * 17, v(&h[1..2])? * 17, v(&h[2..3])? * 17)),
-        _ => None,
-    }
-}
+/// Hex colours and their dark-theme versions, and the stylesheet's rules: view-marks' (style.rs).
+pub use view_marks::style::{dark, rgb};
+use view_marks::style;
 
-/// The dark-theme version of a colour: the same hue, saturation at least 55%, lightness 32%
-/// (<https://en.wikipedia.org/wiki/HSL_and_HSV#From_RGB>).
-pub fn dark((r, g, b): (u8, u8, u8)) -> (u8, u8, u8) {
-    let (r, g, b) = (r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0);
-    let (max, min) = (r.max(g).max(b), r.min(g).min(b));
-    let (l, d) = ((max + min) / 2.0, max - min);
-    let s = if d == 0.0 { 0.0 } else { d / (1.0 - (2.0 * l - 1.0).abs()) };
-    let h = if d == 0.0 {
-        0.0
-    } else if max == r {
-        60.0 * ((g - b) / d).rem_euclid(6.0)
-    } else if max == g {
-        60.0 * ((b - r) / d + 2.0)
-    } else {
-        60.0 * ((r - g) / d + 4.0)
-    };
-    let (s, l) = (if d == 0.0 { 0.0 } else { s.max(0.55) }, 0.32);
-    let c = (1.0 - (2.0 * l - 1.0f32).abs()) * s;
-    let x = c * (1.0 - ((h / 60.0).rem_euclid(2.0) - 1.0).abs());
-    let (r, g, b) = match (h / 60.0) as u32 {
-        0 => (c, x, 0.0),
-        1 => (x, c, 0.0),
-        2 => (0.0, c, x),
-        3 => (0.0, x, c),
-        4 => (x, 0.0, c),
-        _ => (c, 0.0, x),
-    };
-    let m = l - c / 2.0;
-    let to = |v: f32| ((v + m) * 255.0).round().clamp(0.0, 255.0) as u8;
-    (to(r), to(g), to(b))
-}
-
-/// The classes the editor and Reading view put on marked text (editor.rs, view.rs), with the kinds each shows.
+/// The classes the editor and Reading view put on marked text (view-marks; pick::class), with the kinds each shows.
 const CLASSES: [(&str, &[&str]); 6] = [("av-term", &["term"]), ("av-stress", &["stress"]), ("av-point", &["point", "main"]), ("av-quote", &["quote"]),
     ("av-definition", &["definition"]), ("av-citation", &["citation"])];
 
 /// The stylesheet for every code, each scoped to the editors and Reading views of the notes it applies to (they carry
-/// `data-av-code`, editor.rs and view.rs).
+/// `data-av-code`, as view-marks puts it on them).
 pub fn stylesheet_all(codes: &[ColourCode]) -> String {
     codes.iter().map(stylesheet).collect()
 }
@@ -307,7 +268,7 @@ pub fn painted(colour: &Colour) -> Option<(String, String)> {
 /// The stylesheet for a code: each class takes the first colour that shows one of its kinds, and each clause colour
 /// its own class for the sentences the model gives it (`av-c0`, `av-c1` …, pick::class).
 pub fn stylesheet(code: &ColourCode) -> String {
-    let scope = format!("[data-av-code=\"{}\"]", code.id);
+    let scope = style::scope("data-av-code", &code.id);
     let mut css = String::new();
     let mut rule = |class: &str, colour: &Colour| {
         if colour.hidden {
@@ -316,11 +277,11 @@ pub fn stylesheet(code: &ColourCode) -> String {
         let Some(light) = rgb(&colour.hex) else { return };
         let deep = rgb(&colour.dark).unwrap_or_else(|| dark(light));
         let a = colour.opacity.clamp(0.0, 1.0);
-        let paint = |(r, g, b): (u8, u8, u8)| match colour.level {
-            Level::Clause => format!("background-color: rgba({r}, {g}, {b}, {a:.2});"),
-            Level::Phrase => format!("background-image: linear-gradient(rgba({r}, {g}, {b}, {a:.2}), rgba({r}, {g}, {b}, {a:.2}));"),
+        let fill = match colour.level {
+            Level::Clause => style::Fill::Background,
+            Level::Phrase => style::Fill::Overlay,
         };
-        css += &format!("{scope} .{class} {{ {} }}\n.theme-dark {scope} .{class} {{ {} }}\n", paint(light), paint(deep));
+        css += &style::rule(&scope, class, &style::paint(fill, light, a), &style::paint(fill, deep, a));
     };
     for (class, kinds) in CLASSES {
         if let Some(colour) = code.colours.iter().find(|c| c.kinds.iter().any(|k| kinds.contains(&k.as_str()))) {
@@ -341,7 +302,7 @@ pub fn stylesheet(code: &ColourCode) -> String {
 
 /// The colour of the code a mark of kind `k` is drawn in, as the stylesheet draws it: a sentence's or phrase's colour
 /// by its place, any other kind in the first colour that shows it; None when nothing is drawn (no such colour, one
-/// hidden in the floating key, or one whose hex is not a colour). Used by the copy with highlights (highlights.rs).
+/// hidden in the floating key, or one whose hex is not a colour). Used by the copy with highlights (view-marks' highlights.rs).
 pub fn colour_of_kind(code: &ColourCode, k: u8) -> Option<usize> {
     let i = if k >= crate::pick::COLOUR {
         (k - crate::pick::COLOUR) as usize

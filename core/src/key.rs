@@ -2,7 +2,7 @@
 //! colour as a chip with its name and what it marks. It is dragged by its title bar and folds to the title bar alone;
 //! its place and fold are this device's (msg::Local). From it the note, or its folder, is linked to a code (or to
 //! none), and a colour is added to the code. A note with no code shows the picker and a line saying nothing is sent to
-//! the server until one is chosen (editor.rs and view.rs send nothing for it).
+//! the server until one is chosen (view-marks' editor and Reading view send nothing for it).
 //!
 //! The DOM: <https://developer.mozilla.org/en-US/docs/Web/API/Document/createElement>, pointer capture for the drag
 //! (<https://developer.mozilla.org/en-US/docs/Web/API/Element/setPointerCapture>); the open note:

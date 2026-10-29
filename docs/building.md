@@ -95,16 +95,20 @@ or compiled from JavaScript.
 
 - `core/src/`: the plugin crate.
   - On Obsidian's main thread: `app.rs` (settings, status bar, menu, commands, settings tab, the server's life cycle
-    and readings, fetch and file I/O), `editor.rs` (the CodeMirror view plugin), `view.rs` (Reading view), `key.rs`
-    (the floating key), `colours.rs` (colour codes, links and the generated stylesheet), `models.rs` (the notice when
+    and readings, fetch and file I/O), `key.rs` (the floating key), `colours.rs` (colour codes, links and the generated stylesheet), `models.rs` (the notice when
     models are missing, and the Models section of the settings, with the download command to copy; it starts nothing),
     `rules_tab.rs` (the settings' Rules section).
   - In a Web Worker started from the same module: `engine.rs` (notes, cache, request planning), with `rules.rs`
-    (citations, and the colours' own rules), `split.rs` (paragraphs), `pick.rs` (the sensitivity rule), `bold.rs` (the
-    *Always mark* terms), `reading.rs` (finding spans in rendered text), `cache.rs` (per-note cache files).
+    (citations, and the colours' own rules), `pick.rs` (the sensitivity rule), `bold.rs` (the *Always mark* terms),
+    `reading.rs` (the chosen spans in rendered text), `cache.rs` (per-note cache files).
   - `msg.rs` holds the settings and the messages between the two (postcard).
   - The helpers through which Obsidian's and CodeMirror's JavaScript APIs are called by name (`call!`, `obj!`) and the
     settings-tab builder are in the shared crate, `shared` (obsidian-kit), in obsidian-cargo-lib.
+  - What draws the marks is the shared crate `view-marks` (obsidian-cargo-lib): the CodeMirror view plugin
+    (`editor.rs`), Reading view (`reading.rs`), the paragraphs (`split.rs`), the plan of which paragraphs a view
+    wants (`plan.rs`, used by `engine.rs`), finding a passage in rendered text (`locate.rs`), the copy with highlights
+    (`highlights.rs`, `copy.rs`) and the stylesheet's rules (`style.rs`). Augmented View gives it its classes
+    (`pick::class`), each note's colour code as the scope (`data-av-code`) and the worker as the place its events go.
 - `pack/` (in obsidian-cargo-lib): the build shared by the plugins: compiles to WebAssembly, runs wasm-bindgen, stores
   the bindings in the .wasm, builds the server, copies the plugin into a vault.
 - `server/`: the model server, a native Rust program (its own cargo workspace; `src/main.rs` describes the protocol).
