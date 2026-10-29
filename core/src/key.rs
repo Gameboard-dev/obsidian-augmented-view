@@ -25,6 +25,20 @@ fn place(root: &JsValue, x: f64, y: f64) {
     call!(get(root, "classList"), add, "is-placed");
 }
 
+/// The key's inline height: none while it is folded (the title bar's own, without `!important` in the stylesheet to
+/// beat the size the user dragged it to), else that size (`saved`, pixels; 0: the stylesheet's).
+fn height(folded: bool, saved: f64) -> Option<String> {
+    (!folded && saved > 0.0).then(|| format!("{saved}px"))
+}
+
+fn set_height(root: &JsValue, folded: bool, saved: f64) {
+    let style = get(root, "style");
+    match height(folded, saved) {
+        Some(h) => _ = call!(style, setProperty, "height", h),
+        None => _ = call!(style, removeProperty, "height"),
+    }
+}
+
 fn doc() -> JsValue {
     get(&js::global(), "document")
 }
@@ -83,9 +97,7 @@ impl App {
         if self.local.key_w > 0.0 {
             call!(style, setProperty, "width", format!("{}px", self.local.key_w));
         }
-        if self.local.key_h > 0.0 {
-            call!(style, setProperty, "height", format!("{}px", self.local.key_h));
-        }
+        set_height(&root, self.local.key_folded, self.local.key_h);
         // its text and colour boxes grow and shrink with it (user, 2026-10-27): a scale from its width, 250px = 1
         let scale = |r: &JsValue| {
             let w = num(r, "offsetWidth");
@@ -143,10 +155,12 @@ impl App {
         let r = root.clone();
         on(&fold, "click", move |_| {
             let folded = call!(get(&r, "classList"), toggle, "is-folded").is_truthy();
-            with(|a| {
+            let h = with(|a| {
                 a.local.key_folded = folded;
                 a.save_local();
+                a.local.key_h
             });
+            set_height(&r, folded, h.unwrap_or(0.0));
         });
         on(&select, "change", move |e| {
             let value = str(&get(&get(&e, "target"), "value"));
@@ -273,5 +287,17 @@ impl App {
             call!(self.key, remove);
             self.key = JsValue::UNDEFINED;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::height;
+
+    #[test]
+    fn folding_clears_the_height_and_unfolding_restores_it() {
+        assert_eq!(height(true, 320.0), None, "folded: the title bar's height");
+        assert_eq!(height(false, 320.0).as_deref(), Some("320px"), "unfolded: the size the user left");
+        assert_eq!(height(false, 0.0), None, "never resized: the stylesheet's");
     }
 }

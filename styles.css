@@ -1,9 +1,9 @@
 /* The marks are tints behind the text, in the colours of the colour code: the stylesheet is generated from the settings
    (colours.rs) into <style id="augmented-view-colours">. Bold, italics and underlines are left to the writer. A phrase
-   colour's tint keeps its padding on every line a mark wraps over. */
+   colour's tint keeps its padding on every line a mark wraps over (box-decoration-break, unprefixed in Chromium 130 and
+   later: Obsidian 1.8's Electron 34 has Chromium 132; an older one draws a wrapped mark without the padding at the break). */
 .av {
   border-radius: 2px;
-  -webkit-box-decoration-break: clone;
   box-decoration-break: clone;
 }
 
@@ -220,9 +220,9 @@
   display: none;
 }
 
-/* folded: just the title bar, whatever size the key was given */
+/* folded: just the title bar, whatever size the key was given (key.rs clears the dragged height while it is folded) */
 .av-key.is-folded {
-  height: auto !important;
+  height: auto;
   min-height: 0;
   resize: none;
 }
@@ -266,7 +266,7 @@
   body:not(.is-mobile) .setting-contents-layout {
     display: grid;
     grid-template-columns: 11rem minmax(0, 1fr);
-    column-gap: var(--size-4-6);
+    gap: 0 var(--size-4-6);
     align-items: start;
     grid-auto-rows: max-content; /* a scrolling box keeps its height (the tab has a fixed height) */
   }
