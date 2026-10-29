@@ -339,9 +339,37 @@ pub fn stylesheet(code: &ColourCode) -> String {
     css
 }
 
+/// The colour of the code a mark of kind `k` is drawn in, as the stylesheet draws it: a sentence's or phrase's colour
+/// by its place, any other kind in the first colour that shows it; None when nothing is drawn (no such colour, one
+/// hidden in the floating key, or one whose hex is not a colour). Used by the export (export.rs).
+pub fn colour_of_kind(code: &ColourCode, k: u8) -> Option<usize> {
+    let i = if k >= crate::pick::COLOUR {
+        (k - crate::pick::COLOUR) as usize
+    } else {
+        let class = crate::pick::class(k);
+        let kinds = CLASSES.iter().find(|(c, _)| *c == class)?.1;
+        code.colours.iter().position(|c| c.kinds.iter().any(|x| kinds.contains(&x.as_str())))?
+    };
+    let c = code.colours.get(i)?;
+    (!c.hidden && rgb(&c.hex).is_some()).then_some(i)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_kind_takes_the_colour_the_stylesheet_draws_it_in() {
+        use crate::pick::{CITATION, COLOUR, STRESS, TERM};
+        let mut code = defaults()[0].clone();
+        assert_eq!(colour_of_kind(&code, COLOUR + 3), Some(3), "a sentence: its colour");
+        assert_eq!(colour_of_kind(&code, TERM), Some(2), "key terms");
+        assert_eq!(colour_of_kind(&code, CITATION), Some(7));
+        assert_eq!(colour_of_kind(&code, STRESS), None, "no colour shows contrast words");
+        assert_eq!(colour_of_kind(&code, COLOUR + 20), None);
+        code.colours[3].hidden = true;
+        assert_eq!(colour_of_kind(&code, COLOUR + 3), None, "hidden in the key: not drawn, not exported");
+    }
 
     #[test]
     fn hex_and_dark() {

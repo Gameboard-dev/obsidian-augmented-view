@@ -8,6 +8,7 @@
 - [Linking codes to notes](#linking-codes-to-notes)
 - [What the models are told](#what-the-models-are-told)
 - [Rules](#rules)
+- [Exporting a note's colours](#exporting-a-notes-colours)
 
 ## Colour codes
 
@@ -137,3 +138,60 @@ matches empty text is refused (it would match every sentence), and each is compi
 | a limitations colour | Force, pattern `^(First\|Second\|Third), no\b` | "First, no study measures …" (given Findings) |
 | a signposts colour | Force, pattern `^(Another\|A further\|A second) \w+ (is\|concerns)` | "Another consideration is how the codes are spaced." |
 | a methods limitations colour | Force, words `threat, threats, confound, confounds` | "Three threats lie in the data." |
+
+## Exporting a note's colours
+
+Off by default. Turn on **Export colours** (Settings → Augmented View → Export), and the command **Export this note
+with its colours** appears in the command palette and in a note's file menu. It writes a **new** note with the note's
+text, each coloured sentence wrapped in a marker; the note itself is never changed.
+
+- **Which colours.** The ones the editor shows for the note: its colour code, the sensitivity, the rules. Colours
+  hidden in the floating key are left out, as they are not drawn. Phrase colours (key terms, citations and the like)
+  are left out unless **Include phrases** is on; then they are marked inside their sentences' markers. Hiding emphasis
+  (*Show emphasis* off) does not empty an export.
+- **Colours not computed yet.** Paragraphs the server has not coloured yet (the note was never scrolled through, say)
+  are sent first, all of them, in the same requests the views make, so the same GPU settings apply. A notice says how
+  many paragraphs it is waiting for, and the server is started if it is not running (as the status bar's *Start* does,
+  with its question when the GPU has no room). If no server can answer, the export is written with the colours there
+  are, and the notice says how many paragraphs were left plain.
+- **Where it goes.** `<note's name> (colours).md` next to the note, or in **Export folder**, a folder in the vault that
+  you type (it is made if it does not exist). An export already there is replaced only after you say so. Files are
+  written through Obsidian's Vault API, inside the vault only.
+- **What else changes.** Nothing: uncoloured sentences stay as they are, and the export opens with one line saying
+  which colour code was used and when (`Colours exported by Augmented View with the colour code "Reading" on
+  2026-10-29 14:05.`, after the note's properties if it has any). The properties are copied as they are, so an export
+  of a note with aliases has the same aliases.
+
+**Markers.** *Marker format* chooses between two forms. The colour is the colour's hex as its code defines it, the
+category its name:
+
+```markdown
+~={#FFD2D2, Claims}Detectors fail on new data.=~ The datasets are small.
+```
+
+```markdown
+<mark data-colour="#FFD2D2" data-category="Claims">Detectors fail on new data.</mark> The datasets are small.
+```
+
+With **Include phrases**, a phrase sits inside its sentence: `~={#FFD2D2, Claims}Detectors fail on
+~={#FFF59D, Key terms}new data=~.=~`. In the `~=` form, a colour's name loses any `~` and has `{` `}` written as
+`(` `)`, so it cannot end the marker; the colour comes before the first comma. In the HTML form, the attributes are
+escaped, and a stray `<`, `>` or `&` in the marked text is written as an entity (`&lt;`), which Markdown shows as the
+same character; code, links and HTML tags are left as they are.
+
+No Obsidian plugin we know of uses `~={…}…=~`: the coloured-highlight plugins write a colour inside Obsidian's own
+highlight, `=={colour}text==` (Extended Markdown Syntax, Style Obmd, Hilo), so the export does not use `==`, and an
+exported note shows its markers as plain text unless something reads them.
+
+**The Markdown stays intact.** A marker covers only the text of a line, so it never takes in:
+
+- front matter, code blocks, maths blocks, `%%` and `<!-- -->` comment blocks, dividers, embeds or block-id lines;
+- a line's indent, blockquote `>`, callout header, list marker, task box, heading `#`, footnote label, a trailing
+  block id (` ^id`) or its line break: a sentence over two lines gets a marker on each;
+- part of inline code, inline maths, a comment, a link or embed (its target or its text), a footnote, a citation, an
+  HTML tag or a bare URL: a marker that would start or end inside one takes all of it;
+- a table's `|`: the marker is split around it.
+
+Where a phrase would cross the end of its sentence, it is split there. Where a `~=` marker would touch a `~` or an `=`
+and make `~~` (strikethrough) or `==` (a highlight) that was not in the note, an empty HTML comment, `<!---->`, which
+Obsidian does not show, is put between them. The code is `core/src/export.rs`.

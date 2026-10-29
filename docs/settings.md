@@ -22,6 +22,15 @@ The colour codes (each colour's name, colour, level, opacity, dark-theme colour 
 added and removed), the links between codes and notes or folders, and each colour's rules:
 [Colour codes and rules](colour-codes.md).
 
+## Export
+
+| Setting | What it does |
+|---|---|
+| Export colours | Off by default. On: the command *Export this note with its colours* (also in a note's file menu) writes a new note, `<name> (colours).md`, with each coloured sentence wrapped in a marker; the note itself is never changed ([Exporting a note's colours](colour-codes.md#exporting-a-notes-colours)) |
+| Marker format | `~={colour, category}text=~` (the default), or HTML: `<mark data-colour="…" data-category="…">text</mark>` |
+| Include phrases | Mark phrase colours too, inside their sentences' markers (default off: sentences only) |
+| Export folder | A folder in the vault for the exports. Empty: next to each note |
+
 ## What to send
 
 | Setting | What it does |

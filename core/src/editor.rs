@@ -58,6 +58,11 @@ pub fn apply(id: u32, version: u32, marks: &[(u32, u32, u8)]) {
 }
 
 impl App {
+    /// The text an editor of the note shows now (CodeMirror's `state.doc`), if one does.
+    pub(crate) fn editor_text(&self, path: &str) -> Option<String> {
+        self.editors.values().find(|e| e.path == path).map(|e| str(&call!(get(&get(&e.view, "state"), "doc"), toString)))
+    }
+
     /// The note an editor shows: Obsidian's <https://docs.obsidian.md/Reference/TypeScript+API/editorInfoField>.
     fn editor_path(&self, view: &JsValue) -> String {
         let info = call!(get(view, "state"), field, get(&self.obs, "editorInfoField"), false);

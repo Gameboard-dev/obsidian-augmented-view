@@ -56,6 +56,17 @@ type Carry = Option<(String, Vec<(u64, Vec<Span>)>)>;
 const SHARED: &str = "\u{0}paragraphs";
 const SHARED_FILE: &str = "paragraphs.bin";
 const SHARED_MAX: usize = 20_000; // results kept per layer: a few MB of spans
+/// Failed requests in a row after which an export stops waiting and is written with the colours there are.
+const EXPORT_GIVE_UP: u32 = 4;
+
+/// A note being exported with its colours (export.rs): written once every paragraph has its results, or when told to
+/// finish now.
+struct ExportJob {
+    path: String,
+    header: String,
+    now: bool,
+    told: bool,
+}
 
 /// The latest results of every paragraph seen, by hash, whichever note it was in.
 #[derive(Default)]
@@ -244,6 +255,7 @@ pub struct Engine {
     dirty_blocks: HashSet<u32>,
     tick: u64,
     shared: Shared,
+    exports: HashMap<u32, ExportJob>,
 }
 
 impl Engine {
@@ -321,6 +333,13 @@ impl Engine {
                 }
                 self.views.values_mut().filter(|v| v.path == from).for_each(|v| v.path = to.clone());
                 self.blocks.values_mut().filter(|b| b.path == from).for_each(|b| b.path = to.clone());
+                self.exports.values_mut().filter(|j| j.path == from).for_each(|j| j.path = to.clone());
+            }
+            ToWorker::Export { req, path, header } => _ = self.exports.insert(req, ExportJob { path, header, now: false, told: false }),
+            ToWorker::ExportNow(req) => {
+                if let Some(j) = self.exports.get_mut(&req) {
+                    j.now = true;
+                }
             }
         }
     }
@@ -341,7 +360,69 @@ impl Engine {
             let segs = self.wrap(block);
             out.push(FromWorker::Wrap { block, segs });
         }
+        out.extend(self.exports_out());
         out
+    }
+
+    /// The paragraphs of a note still without results in a layer that is on (the colours layer only when the note
+    /// has a code to ask with).
+    fn missing(&self, note: &Note) -> u32 {
+        let layers: Vec<usize> = [FAST, COLOURS].into_iter().filter(|&l| self.layer_on(l) && (l != COLOURS || note.code != 0)).collect();
+        note.paras.iter().filter(|p| layers.iter().any(|&l| !note.layers[l].contains_key(&note.lid(l, p.id)))).count() as u32
+    }
+
+    /// Exports whose note has every paragraph's results (or that are told to finish now, or whose server keeps
+    /// failing): their text; the others say once how many paragraphs they wait for.
+    fn exports_out(&mut self) -> Vec<FromWorker> {
+        let mut out = Vec::new();
+        let failing = (0..2).any(|l| self.layer_on(l) && self.failures[l] >= EXPORT_GIVE_UP);
+        let mut reqs: Vec<u32> = self.exports.keys().copied().collect();
+        reqs.sort_unstable();
+        for req in reqs {
+            let job = &self.exports[&req];
+            let Some(note) = self.notes.get(&job.path) else {
+                self.exports.remove(&req);
+                out.push(FromWorker::Exported { req, text: String::new(), markers: 0, missing: 0, ok: false });
+                continue;
+            };
+            if !note.loaded {
+                continue; // its cache file first
+            }
+            let missing = self.missing(note);
+            if missing == 0 || job.now || failing {
+                let (text, markers) = self.export_text(&job.path, note, &job.header);
+                self.exports.remove(&req);
+                out.push(FromWorker::Exported { req, text, markers: markers as u32, missing, ok: true });
+            } else if !job.told {
+                out.push(FromWorker::ExportWaiting { req, missing });
+                if let Some(j) = self.exports.get_mut(&req) {
+                    j.told = true;
+                }
+            }
+        }
+        out
+    }
+
+    /// A note's text with its colours as markers (export.rs): the marks the editor draws, at the same sensitivity, with
+    /// the same code and rules (also while emphasis is hidden), sentences' colours and, if the settings say so,
+    /// phrases'; and the number of markers.
+    fn export_text(&self, path: &str, note: &Note, header: &str) -> (String, usize) {
+        let s = Settings { enabled: true, ..self.settings.clone() };
+        let Some(code) = self.code_of(path) else { return (crate::export::with_header(&note.text, header), 0) };
+        let mut marks = Vec::new();
+        for p in &note.paras {
+            for (from, to, k) in self.ranges_with(&s, path, note, p) {
+                let Some(i) = colours::colour_of_kind(code, k) else { continue };
+                let phrase = code.colours[i].level == colours::Level::Phrase;
+                if phrase && !s.export_phrases {
+                    continue;
+                }
+                marks.push(crate::export::Mark { from, to, colour: i, phrase });
+            }
+        }
+        let named: Vec<crate::export::Named> = code.colours.iter().map(|c| crate::export::Named { colour: c.hex.clone(), name: c.name.clone() }).collect();
+        let (text, n) = crate::export::write(&note.text, &marks, &named, crate::export::Format::from_setting(&s.export_format));
+        (crate::export::with_header(&text, header), n)
     }
 
     /// Cache files of the notes whose results changed, and the vault-wide store if it did.
@@ -459,7 +540,7 @@ impl Engine {
 
     fn request(&mut self, now: f64) -> Option<FromWorker> {
         self.reuse();
-        if !self.running || !self.settings.enabled {
+        if !self.running || (!self.settings.enabled && self.exports.is_empty()) {
             return None;
         }
         let wanted: Vec<_> = [FAST, COLOURS].into_iter().filter(|&l| self.layer_on(l)).map(|l| (l, self.wanted(l, now))).collect();
@@ -509,10 +590,21 @@ impl Engine {
     }
 
     /// Paragraphs to ask for in this layer, nearest the views first: (paragraphs from the screen, note, paragraph index).
-    /// Those on screen once their view has rested `SETTLE_MS`, the others once it has rested `PREFETCH_MS`.
+    /// Those on screen once their view has rested `SETTLE_MS`, the others once it has rested `PREFETCH_MS`; every
+    /// paragraph of a note being exported, as if on screen (also while emphasis is hidden, when the views ask nothing).
     fn wanted(&self, layer: usize, now: f64) -> Vec<(u32, String, usize)> {
         let mut best: HashMap<u64, (u32, &String, usize)> = HashMap::new();
-        for v in self.views.values() {
+        for job in self.exports.values() {
+            let Some(note) = self.notes.get(&job.path).filter(|n| n.loaded) else { continue };
+            for (i, p) in note.paras.iter().enumerate() {
+                let lid = note.lid(layer, p.id);
+                if (layer == COLOURS && note.code == 0) || note.layers[layer].contains_key(&lid) || self.inflight[layer].contains(&lid) {
+                    continue;
+                }
+                best.insert(p.id, (0, &job.path, i));
+            }
+        }
+        for v in self.views.values().filter(|_| self.settings.enabled) {
             let rested = now - v.moved;
             if rested < SETTLE_MS {
                 continue;
@@ -560,13 +652,18 @@ impl Engine {
     /// The ranges to mark in a paragraph, in the note's UTF-16 offsets: the chosen spans, the user's own terms and the
     /// citations, with each sentence's colour cut where a rule of its code wins (pick::cut).
     fn para_ranges(&self, path: &str, note: &Note, p: &Para) -> Vec<(u32, u32, u8)> {
+        self.ranges_with(&self.settings, path, note, p)
+    }
+
+    /// [`Self::para_ranges`] under settings `s` (the export's: emphasis shown).
+    fn ranges_with(&self, s: &Settings, path: &str, note: &Note, p: &Para) -> Vec<(u32, u32, u8)> {
         let ruled = self.ruled(path, note, p);
         let spans: Vec<&Span> = ruled.as_ref().map_or_else(|| note.spans(p.id), |r| r.iter().collect());
-        let mut out = pick::source_ranges(&spans, p.words, p.to16 - p.from16, &self.settings);
-        if self.own_on() {
+        let mut out = pick::source_ranges(&spans, p.words, p.to16 - p.from16, s);
+        if s.enabled && s.terms && !self.bold.is_empty() {
             out.extend(bold::source_ranges(note.para_text(p), &self.bold).into_iter().map(|(a, e)| (a, e, pick::TERM)));
         }
-        if self.settings.enabled && self.settings.sensitivity > 0.0 {
+        if s.enabled && s.sensitivity > 0.0 {
             out.extend(rules::citations(note.para_text(p)).into_iter().map(|(a, e)| (a, e, pick::CITATION)));
         }
         pick::tidy(&mut out);
@@ -787,7 +884,7 @@ impl Engine {
 
     /// Drop notes no view or block shows, beyond the most recent few, once saved.
     fn gc(&mut self) {
-        let shown: HashSet<&String> = self.views.values().map(|v| &v.path).chain(self.blocks.values().map(|b| &b.path)).collect();
+        let shown: HashSet<&String> = self.views.values().map(|v| &v.path).chain(self.blocks.values().map(|b| &b.path)).chain(self.exports.values().map(|j| &j.path)).collect();
         let mut idle: Vec<(u64, String)> = self.notes.iter().filter(|(p, n)| !shown.contains(p) && !n.dirty).map(|(p, n)| (n.touched, p.clone())).collect();
         idle.sort_unstable();
         let excess = idle.len().saturating_sub(RECENT_NOTES);
@@ -1049,6 +1146,65 @@ mod tests {
         let again = answer(&mut e, reply);
         assert_eq!(again.len(), 1);
         assert_eq!(again[0].1["colours"][0]["description"], "Something else.");
+    }
+
+    /// Run the outbox until it is empty, answering each sentence's colour with the code's first colour: whether the
+    /// export said it waits (and for how many paragraphs), and what it wrote.
+    fn export_run(e: &mut Engine) -> (Option<u32>, Option<(String, u32, u32, bool)>) {
+        let (mut waiting, mut done) = (None, None);
+        for _ in 0..50 {
+            let out = e.outbox(0.0);
+            if out.is_empty() {
+                break;
+            }
+            for m in out {
+                match m {
+                    FromWorker::Fetch { req, endpoint, body, .. } => {
+                        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+                        let reply: String = v["paras"].as_array().unwrap().iter().map(|p| {
+                            let len = p["text"].as_str().unwrap().encode_utf16().count();
+                            let spans = if endpoint == "/colours" { format!(r#"[{{"k":"colour","c":0,"w":0.95,"at":[[0,{len}]],"v":""}}]"#) } else { "[]".into() };
+                            format!("{{\"id\":\"{}\",\"spans\":{spans}}}\n", p["id"].as_str().unwrap())
+                        }).collect();
+                        e.handle(ToWorker::Chunk { req, text: reply }, 0.0);
+                        e.handle(ToWorker::End { req, ok: true }, 0.0);
+                    }
+                    FromWorker::ExportWaiting { missing, .. } => waiting = Some(missing),
+                    FromWorker::Exported { text, markers, missing, ok, .. } => done = Some((text, markers, missing, ok)),
+                    FromWorker::Save { file, .. } => assert!(!file.ends_with(".md"), "only cache files are saved, never a note"),
+                    _ => {}
+                }
+            }
+        }
+        (waiting, done)
+    }
+
+    #[test]
+    fn an_export_computes_what_it_lacks_then_writes_a_new_text_with_markers() {
+        // emphasis hidden and no view open: the export still asks for every paragraph
+        let mut s = Settings { context_paragraphs: 0, terms: false, sensitivity: 1.0, enabled: false, ..Default::default() };
+        colours::link(&mut s.links, "a.md", "reading", false);
+        colours::link(&mut s.links, "b.md", "reading", false);
+        let mut e = Engine::default();
+        e.handle(ToWorker::Settings(s), 0.0);
+        e.handle(ToWorker::Server { running: true, model: "m".into(), claims_model: "q".into(), has_claims: true, max_paras: 8 }, 0.0);
+        answer_shared(&mut e, None);
+        let text = "Detectors fail.\n\n- Second, no study has tried.\n\n```\ncode\n```";
+        open(&mut e, "a.md", text, None);
+        e.handle(ToWorker::Export { req: 5, path: "a.md".into(), header: "H.".into() }, 0.0);
+        let (waiting, done) = export_run(&mut e);
+        assert_eq!(waiting, Some(2), "said once what it waits for");
+        let c = "~={#FFD2D2, Claims}";
+        assert_eq!(done, Some((format!("H.\n\n{c}Detectors fail.=~\n\n- {c}Second, no study has tried.=~\n\n```\ncode\n```"), 2, 0, true)));
+        assert_eq!(e.notes["a.md"].text, text, "the note's text is untouched");
+        assert!(e.exports.is_empty());
+        // the server is down: told to finish now, the export is written with what there is
+        e.handle(ToWorker::Server { running: false, model: "m".into(), claims_model: "q".into(), has_claims: true, max_paras: 8 }, 0.0);
+        open(&mut e, "b.md", "New words here.", None);
+        e.handle(ToWorker::Export { req: 6, path: "b.md".into(), header: "H.".into() }, 0.0);
+        assert_eq!(export_run(&mut e), (Some(1), None), "waits for the server");
+        e.handle(ToWorker::ExportNow(6), 0.0);
+        assert_eq!(export_run(&mut e).1, Some(("H.\n\nNew words here.".to_string(), 0, 1, true)));
     }
 
     #[test]
