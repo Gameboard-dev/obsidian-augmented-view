@@ -21,8 +21,10 @@ Install it from Obsidian's community plugins, or copy `main.js`, `manifest.json`
 
 ## 2. The server program
 
-Download the server for your computer from the same
-[release](https://github.com/Gameboard-dev/obsidian-augmented-view/releases):
+Download the server for your computer from its own release,
+[server-0.6.2](https://github.com/Gameboard-dev/obsidian-augmented-view/releases/tag/server-0.6.2) (since plugin 0.6.4
+the plugin's releases carry only `main.js`, `manifest.json` and `styles.css`; a newer server, when there is one, is
+published as `server-<version>` on the [releases page](https://github.com/Gameboard-dev/obsidian-augmented-view/releases)):
 
 | Computer | File |
 |---|---|
@@ -32,7 +34,7 @@ Download the server for your computer from the same
 
 Save it in the plugin's folder as `augmented-view-server.exe` (the CPU build as `augmented-view-server-cpu.exe`), or
 keep it anywhere under any name and set the *Server* (or *CPU server*) setting to its path. The `.sha256` file beside
-it in the release lets you check it (`certutil -hashfile <file> SHA256` on Windows, `shasum -a 256 <file>` elsewhere).
+it in the server release lets you check it (`certutil -hashfile <file> SHA256` on Windows, `shasum -a 256 <file>` elsewhere).
 Keep the release's two licence files with it: `augmented-view-server-LICENSE.txt` and
 `augmented-view-server-THIRD-PARTY-LICENSES.txt`.
 

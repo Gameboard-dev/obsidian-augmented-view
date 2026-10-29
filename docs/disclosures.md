@@ -100,8 +100,8 @@ Obsidian's JavaScript environment, which cannot load native GPU libraries such a
 separate native program, the **model server**, and the plugin sends it paragraphs over HTTP on `127.0.0.1`.
 
 The server is open source, built from the Rust source in this repository. You download it from the
-[releases page](https://github.com/Gameboard-dev/obsidian-augmented-view/releases) (each release carries its SHA-256
-checksum and its licence files) or build it yourself, and you put it in place. The plugin starts it as a child process
+[server release](https://github.com/Gameboard-dev/obsidian-augmented-view/releases/tag/server-0.6.2), published apart
+from the plugin's releases (it carries each program's SHA-256 checksum and the licence files) or build it yourself, and you put it in place. The plugin starts it as a child process
 when you ask (or with Obsidian, if you turn on *Start with Obsidian*), stops it when Obsidian closes or after 30 idle
 minutes, and adopts one already running on its port. It starts no other program.
 

@@ -676,8 +676,8 @@ fn fixed(mut s: Settings) -> Settings {
     (s.terms, s.contrast, s.quotes, s.definitions, s.points) = (true, true, true, true, true);
     s
 }
-/// Where the servers for each kind of computer are published (docs/installation.md).
-const RELEASES: &str = "https://github.com/Gameboard-dev/obsidian-augmented-view/releases";
+/// Where the servers for each kind of computer are published: their own release, apart from the plugin's (docs/installation.md).
+const RELEASES: &str = "https://github.com/Gameboard-dev/obsidian-augmented-view/releases/tag/server-0.6.2";
 
 impl App {
     /// Whether this device uses a server elsewhere (its Server address, or in Ignis the relay), rather than this

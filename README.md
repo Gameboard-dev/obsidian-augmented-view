@@ -56,8 +56,9 @@ which a plugin inside Obsidian cannot use.
 1. Install the plugin from Obsidian's community plugins, or copy `main.js`, `manifest.json` and `styles.css` from a
    [release](https://github.com/Gameboard-dev/obsidian-augmented-view/releases) into
    `<vault>/.obsidian/plugins/augmented-view/`.
-2. Download the **model server** for your computer from the same release and put it in the plugin's folder, with its
-   two licence files.
+2. Download the **model server** for your computer from its own
+   [server release](https://github.com/Gameboard-dev/obsidian-augmented-view/releases/tag/server-0.6.2) and put it in
+   the plugin's folder, with its two licence files.
 3. **Download the models** by running the server's download command in a terminal (Settings → Augmented View →
    **Models** shows it, with a Copy button). Or start the server yourself in a terminal: it lists the missing models
    and asks whether to download them.

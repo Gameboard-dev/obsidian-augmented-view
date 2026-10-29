@@ -38,7 +38,15 @@ point the plugin's *Server* setting at the server, or copy it into the plugin's 
 
 The release assets are the files to copy into `<vault>/.obsidian/plugins/augmented-view/`. With a server built,
 `--release` also writes the server as `augmented-view-server-<platform>` with its `.sha256` and its two licence files,
-and refuses to release a server without them.
+and refuses to release a server without them. Since 0.6.4 those go to a release of their own, `server-<version>`
+(created with `--latest=false`, so the plugin's release stays the latest), and the plugin's release (tag = the
+manifest's version) carries only `main.js`, `manifest.json` and `styles.css`, as Obsidian's review asks.
+
+A plugin release is built by GitHub Actions (`.github/workflows/release.yml`) when its tag is pushed: it checks out
+obsidian-cargo-lib at the commit pinned in the workflow, puts this repository in it as `augmented-view`, runs
+`cargo run -p pack --release -- augmented-view --release <dir>`, attests the three files' build provenance
+([artifact attestations](https://docs.github.com/en/actions/security-for-github-actions/using-artifact-attestations/using-artifact-attestations-to-establish-provenance-for-builds))
+and publishes them. Check a downloaded file with `gh attestation verify main.js --repo Gameboard-dev/obsidian-augmented-view`.
 
 ## The server
 
