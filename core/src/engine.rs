@@ -56,14 +56,15 @@ type Carry = Option<(String, Vec<(u64, Vec<Span>)>)>;
 const SHARED: &str = "\u{0}paragraphs";
 const SHARED_FILE: &str = "paragraphs.bin";
 const SHARED_MAX: usize = 20_000; // results kept per layer: a few MB of spans
-/// Failed requests in a row after which an export stops waiting and is written with the colours there are.
-const EXPORT_GIVE_UP: u32 = 4;
+/// Failed requests in a row after which a copy stops waiting and is made with the colours there are.
+const COPY_GIVE_UP: u32 = 4;
 
-/// A note being exported with its colours (export.rs): written once every paragraph has its results, or when told to
-/// finish now.
-struct ExportJob {
+/// A selection being copied with its highlights (highlights.rs): [from, to) in the note's UTF-16 offsets, made once
+/// every paragraph it touches has its results, or when told to finish now.
+struct CopyJob {
     path: String,
-    header: String,
+    from: u32,
+    to: u32,
     now: bool,
     told: bool,
 }
@@ -255,7 +256,7 @@ pub struct Engine {
     dirty_blocks: HashSet<u32>,
     tick: u64,
     shared: Shared,
-    exports: HashMap<u32, ExportJob>,
+    copies: HashMap<u32, CopyJob>,
 }
 
 impl Engine {
@@ -333,11 +334,11 @@ impl Engine {
                 }
                 self.views.values_mut().filter(|v| v.path == from).for_each(|v| v.path = to.clone());
                 self.blocks.values_mut().filter(|b| b.path == from).for_each(|b| b.path = to.clone());
-                self.exports.values_mut().filter(|j| j.path == from).for_each(|j| j.path = to.clone());
+                self.copies.values_mut().filter(|j| j.path == from).for_each(|j| j.path = to.clone());
             }
-            ToWorker::Export { req, path, header } => _ = self.exports.insert(req, ExportJob { path, header, now: false, told: false }),
-            ToWorker::ExportNow(req) => {
-                if let Some(j) = self.exports.get_mut(&req) {
+            ToWorker::Copy { req, path, from, to } => _ = self.copies.insert(req, CopyJob { path, from, to, now: false, told: false }),
+            ToWorker::CopyNow(req) => {
+                if let Some(j) = self.copies.get_mut(&req) {
                     j.now = true;
                 }
             }
@@ -360,42 +361,47 @@ impl Engine {
             let segs = self.wrap(block);
             out.push(FromWorker::Wrap { block, segs });
         }
-        out.extend(self.exports_out());
+        out.extend(self.copies_out());
         out
     }
 
-    /// The paragraphs of a note still without results in a layer that is on (the colours layer only when the note
-    /// has a code to ask with).
-    fn missing(&self, note: &Note) -> u32 {
-        let layers: Vec<usize> = [FAST, COLOURS].into_iter().filter(|&l| self.layer_on(l) && (l != COLOURS || note.code != 0)).collect();
-        note.paras.iter().filter(|p| layers.iter().any(|&l| !note.layers[l].contains_key(&note.lid(l, p.id)))).count() as u32
+    /// The paragraphs of a note that a selection [from, to) touches.
+    fn selected(note: &Note, from: u32, to: u32) -> impl Iterator<Item = (usize, &Para)> {
+        note.paras.iter().enumerate().filter(move |(_, p)| p.to16 > from && p.from16 < to)
     }
 
-    /// Exports whose note has every paragraph's results (or that are told to finish now, or whose server keeps
-    /// failing): their text; the others say once how many paragraphs they wait for.
-    fn exports_out(&mut self) -> Vec<FromWorker> {
+    /// Those of a selection's paragraphs still without results in a layer that is on (the colours layer only when the
+    /// note has a code to ask with).
+    fn missing(&self, note: &Note, from: u32, to: u32) -> u32 {
+        let layers: Vec<usize> = [FAST, COLOURS].into_iter().filter(|&l| self.layer_on(l) && (l != COLOURS || note.code != 0)).collect();
+        Self::selected(note, from, to).filter(|(_, p)| layers.iter().any(|&l| !note.layers[l].contains_key(&note.lid(l, p.id)))).count() as u32
+    }
+
+    /// Copies whose paragraphs all have their results (or that are told to finish now, or whose server keeps failing):
+    /// their text; the others say once how many paragraphs they wait for.
+    fn copies_out(&mut self) -> Vec<FromWorker> {
         let mut out = Vec::new();
-        let failing = (0..2).any(|l| self.layer_on(l) && self.failures[l] >= EXPORT_GIVE_UP);
-        let mut reqs: Vec<u32> = self.exports.keys().copied().collect();
+        let failing = (0..2).any(|l| self.layer_on(l) && self.failures[l] >= COPY_GIVE_UP);
+        let mut reqs: Vec<u32> = self.copies.keys().copied().collect();
         reqs.sort_unstable();
         for req in reqs {
-            let job = &self.exports[&req];
+            let job = &self.copies[&req];
             let Some(note) = self.notes.get(&job.path) else {
-                self.exports.remove(&req);
-                out.push(FromWorker::Exported { req, text: String::new(), markers: 0, missing: 0, ok: false });
+                self.copies.remove(&req);
+                out.push(FromWorker::Copied { req, text: String::new(), markers: 0, missing: 0, ok: false });
                 continue;
             };
             if !note.loaded {
                 continue; // its cache file first
             }
-            let missing = self.missing(note);
+            let missing = self.missing(note, job.from, job.to);
             if missing == 0 || job.now || failing {
-                let (text, markers) = self.export_text(&job.path, note, &job.header);
-                self.exports.remove(&req);
-                out.push(FromWorker::Exported { req, text, markers: markers as u32, missing, ok: true });
+                let (text, markers) = self.copy_text(&job.path, note, job.from, job.to);
+                self.copies.remove(&req);
+                out.push(FromWorker::Copied { req, text, markers: markers as u32, missing, ok: true });
             } else if !job.told {
-                out.push(FromWorker::ExportWaiting { req, missing });
-                if let Some(j) = self.exports.get_mut(&req) {
+                out.push(FromWorker::CopyWaiting { req, missing });
+                if let Some(j) = self.copies.get_mut(&req) {
                     j.told = true;
                 }
             }
@@ -403,26 +409,27 @@ impl Engine {
         out
     }
 
-    /// A note's text with its colours as markers (export.rs): the marks the editor draws, at the same sensitivity, with
-    /// the same code and rules (also while emphasis is hidden), sentences' colours and, if the settings say so,
-    /// phrases'; and the number of markers.
-    fn export_text(&self, path: &str, note: &Note, header: &str) -> (String, usize) {
+    /// A selection's text with its colours as markers (highlights.rs): the marks the editor draws, at the same
+    /// sensitivity, with the same code and rules (also while emphasis is hidden), sentences' colours and, if the
+    /// settings say so, phrases'; and the number of markers.
+    fn copy_text(&self, path: &str, note: &Note, from: u32, to: u32) -> (String, usize) {
+        use crate::highlights::{write_range, Format, Mark, Named};
         let s = Settings { enabled: true, ..self.settings.clone() };
-        let Some(code) = self.code_of(path) else { return (crate::export::with_header(&note.text, header), 0) };
+        let format = Format::from_setting(&s.highlight_format);
+        let Some(code) = self.code_of(path) else { return write_range(&note.text, &[], &[], format, from, to) };
         let mut marks = Vec::new();
-        for p in &note.paras {
-            for (from, to, k) in self.ranges_with(&s, path, note, p) {
+        for (_, p) in Self::selected(note, from, to) {
+            for (a, e, k) in self.ranges_with(&s, path, note, p) {
                 let Some(i) = colours::colour_of_kind(code, k) else { continue };
                 let phrase = code.colours[i].level == colours::Level::Phrase;
-                if phrase && !s.export_phrases {
+                if phrase && !s.highlight_phrases {
                     continue;
                 }
-                marks.push(crate::export::Mark { from, to, colour: i, phrase });
+                marks.push(Mark { from: a, to: e, colour: i, phrase });
             }
         }
-        let named: Vec<crate::export::Named> = code.colours.iter().map(|c| crate::export::Named { colour: c.hex.clone(), name: c.name.clone() }).collect();
-        let (text, n) = crate::export::write(&note.text, &marks, &named, crate::export::Format::from_setting(&s.export_format));
-        (crate::export::with_header(&text, header), n)
+        let named: Vec<Named> = code.colours.iter().map(|c| Named { colour: c.hex.clone(), name: c.name.clone() }).collect();
+        write_range(&note.text, &marks, &named, format, from, to)
     }
 
     /// Cache files of the notes whose results changed, and the vault-wide store if it did.
@@ -540,7 +547,7 @@ impl Engine {
 
     fn request(&mut self, now: f64) -> Option<FromWorker> {
         self.reuse();
-        if !self.running || (!self.settings.enabled && self.exports.is_empty()) {
+        if !self.running || (!self.settings.enabled && self.copies.is_empty()) {
             return None;
         }
         let wanted: Vec<_> = [FAST, COLOURS].into_iter().filter(|&l| self.layer_on(l)).map(|l| (l, self.wanted(l, now))).collect();
@@ -591,12 +598,13 @@ impl Engine {
 
     /// Paragraphs to ask for in this layer, nearest the views first: (paragraphs from the screen, note, paragraph index).
     /// Those on screen once their view has rested `SETTLE_MS`, the others once it has rested `PREFETCH_MS`; every
-    /// paragraph of a note being exported, as if on screen (also while emphasis is hidden, when the views ask nothing).
+    /// paragraph a selection being copied touches, as if on screen (also while emphasis is hidden, when the views ask
+    /// nothing).
     fn wanted(&self, layer: usize, now: f64) -> Vec<(u32, String, usize)> {
         let mut best: HashMap<u64, (u32, &String, usize)> = HashMap::new();
-        for job in self.exports.values() {
+        for job in self.copies.values() {
             let Some(note) = self.notes.get(&job.path).filter(|n| n.loaded) else { continue };
-            for (i, p) in note.paras.iter().enumerate() {
+            for (i, p) in Self::selected(note, job.from, job.to) {
                 let lid = note.lid(layer, p.id);
                 if (layer == COLOURS && note.code == 0) || note.layers[layer].contains_key(&lid) || self.inflight[layer].contains(&lid) {
                     continue;
@@ -655,7 +663,7 @@ impl Engine {
         self.ranges_with(&self.settings, path, note, p)
     }
 
-    /// [`Self::para_ranges`] under settings `s` (the export's: emphasis shown).
+    /// [`Self::para_ranges`] under settings `s` (a copy's: emphasis shown).
     fn ranges_with(&self, s: &Settings, path: &str, note: &Note, p: &Para) -> Vec<(u32, u32, u8)> {
         let ruled = self.ruled(path, note, p);
         let spans: Vec<&Span> = ruled.as_ref().map_or_else(|| note.spans(p.id), |r| r.iter().collect());
@@ -884,7 +892,7 @@ impl Engine {
 
     /// Drop notes no view or block shows, beyond the most recent few, once saved.
     fn gc(&mut self) {
-        let shown: HashSet<&String> = self.views.values().map(|v| &v.path).chain(self.blocks.values().map(|b| &b.path)).chain(self.exports.values().map(|j| &j.path)).collect();
+        let shown: HashSet<&String> = self.views.values().map(|v| &v.path).chain(self.blocks.values().map(|b| &b.path)).chain(self.copies.values().map(|j| &j.path)).collect();
         let mut idle: Vec<(u64, String)> = self.notes.iter().filter(|(p, n)| !shown.contains(p) && !n.dirty).map(|(p, n)| (n.touched, p.clone())).collect();
         idle.sort_unstable();
         let excess = idle.len().saturating_sub(RECENT_NOTES);
@@ -1149,9 +1157,9 @@ mod tests {
     }
 
     /// Run the outbox until it is empty, answering each sentence's colour with the code's first colour: whether the
-    /// export said it waits (and for how many paragraphs), and what it wrote.
-    fn export_run(e: &mut Engine) -> (Option<u32>, Option<(String, u32, u32, bool)>) {
-        let (mut waiting, mut done) = (None, None);
+    /// copy said it waits (and for how many paragraphs), what it made, and the paragraphs' texts sent to the server.
+    fn copy_run(e: &mut Engine) -> (Option<u32>, Option<(String, u32, u32, bool)>, Vec<String>) {
+        let (mut waiting, mut done, mut sent) = (None, None, Vec::new());
         for _ in 0..50 {
             let out = e.outbox(0.0);
             if out.is_empty() {
@@ -1162,6 +1170,7 @@ mod tests {
                     FromWorker::Fetch { req, endpoint, body, .. } => {
                         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
                         let reply: String = v["paras"].as_array().unwrap().iter().map(|p| {
+                            sent.push(p["text"].as_str().unwrap().to_string());
                             let len = p["text"].as_str().unwrap().encode_utf16().count();
                             let spans = if endpoint == "/colours" { format!(r#"[{{"k":"colour","c":0,"w":0.95,"at":[[0,{len}]],"v":""}}]"#) } else { "[]".into() };
                             format!("{{\"id\":\"{}\",\"spans\":{spans}}}\n", p["id"].as_str().unwrap())
@@ -1169,19 +1178,19 @@ mod tests {
                         e.handle(ToWorker::Chunk { req, text: reply }, 0.0);
                         e.handle(ToWorker::End { req, ok: true }, 0.0);
                     }
-                    FromWorker::ExportWaiting { missing, .. } => waiting = Some(missing),
-                    FromWorker::Exported { text, markers, missing, ok, .. } => done = Some((text, markers, missing, ok)),
+                    FromWorker::CopyWaiting { missing, .. } => waiting = Some(missing),
+                    FromWorker::Copied { text, markers, missing, ok, .. } => done = Some((text, markers, missing, ok)),
                     FromWorker::Save { file, .. } => assert!(!file.ends_with(".md"), "only cache files are saved, never a note"),
                     _ => {}
                 }
             }
         }
-        (waiting, done)
+        (waiting, done, sent)
     }
 
     #[test]
-    fn an_export_computes_what_it_lacks_then_writes_a_new_text_with_markers() {
-        // emphasis hidden and no view open: the export still asks for every paragraph
+    fn a_copy_computes_what_its_paragraphs_lack_then_marks_only_the_selection() {
+        // emphasis hidden and no view open: the copy still asks for the paragraphs it touches, and only those
         let mut s = Settings { context_paragraphs: 0, terms: false, sensitivity: 1.0, enabled: false, ..Default::default() };
         colours::link(&mut s.links, "a.md", "reading", false);
         colours::link(&mut s.links, "b.md", "reading", false);
@@ -1189,22 +1198,25 @@ mod tests {
         e.handle(ToWorker::Settings(s), 0.0);
         e.handle(ToWorker::Server { running: true, model: "m".into(), claims_model: "q".into(), has_claims: true, max_paras: 8 }, 0.0);
         answer_shared(&mut e, None);
-        let text = "Detectors fail.\n\n- Second, no study has tried.\n\n```\ncode\n```";
+        let text = "Detectors fail.\n\n- Second, no study has tried.\n\nA third one stays unasked.";
         open(&mut e, "a.md", text, None);
-        e.handle(ToWorker::Export { req: 5, path: "a.md".into(), header: "H.".into() }, 0.0);
-        let (waiting, done) = export_run(&mut e);
+        let (from, to) = (text.find("fail").unwrap() as u32, text.find(" study").unwrap() as u32);
+        e.handle(ToWorker::Copy { req: 5, path: "a.md".into(), from, to }, 0.0);
+        let (waiting, done, sent) = copy_run(&mut e);
         assert_eq!(waiting, Some(2), "said once what it waits for");
+        assert!(sent.iter().all(|t| !t.contains("third")), "only the selected paragraphs are sent: {sent:?}");
         let c = "~={#FFD2D2, Claims}";
-        assert_eq!(done, Some((format!("H.\n\n{c}Detectors fail.=~\n\n- {c}Second, no study has tried.=~\n\n```\ncode\n```"), 2, 0, true)));
+        assert_eq!(done, Some((format!("{c}fail.=~\n\n- {c}Second, no=~"), 2, 0, true)));
         assert_eq!(e.notes["a.md"].text, text, "the note's text is untouched");
-        assert!(e.exports.is_empty());
-        // the server is down: told to finish now, the export is written with what there is
+        assert!(e.copies.is_empty());
+        // the server is down: told to finish now, the copy is plain where there are no colours
         e.handle(ToWorker::Server { running: false, model: "m".into(), claims_model: "q".into(), has_claims: true, max_paras: 8 }, 0.0);
         open(&mut e, "b.md", "New words here.", None);
-        e.handle(ToWorker::Export { req: 6, path: "b.md".into(), header: "H.".into() }, 0.0);
-        assert_eq!(export_run(&mut e), (Some(1), None), "waits for the server");
-        e.handle(ToWorker::ExportNow(6), 0.0);
-        assert_eq!(export_run(&mut e).1, Some(("H.\n\nNew words here.".to_string(), 0, 1, true)));
+        e.handle(ToWorker::Copy { req: 6, path: "b.md".into(), from: 4, to: 9 }, 0.0);
+        let (waiting, done, _) = copy_run(&mut e);
+        assert_eq!((waiting, done), (Some(1), None), "waits for the server");
+        e.handle(ToWorker::CopyNow(6), 0.0);
+        assert_eq!(copy_run(&mut e).1, Some(("words".to_string(), 0, 1, true)));
     }
 
     #[test]

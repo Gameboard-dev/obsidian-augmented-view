@@ -22,14 +22,13 @@ The colour codes (each colour's name, colour, level, opacity, dark-theme colour 
 added and removed), the links between codes and notes or folders, and each colour's rules:
 [Colour codes and rules](colour-codes.md).
 
-## Export
+## Copy with highlights
 
 | Setting | What it does |
 |---|---|
-| Export colours | Off by default. On: the command *Export this note with its colours* (also in a note's file menu) writes a new note, `<name> (colours).md`, with each coloured sentence wrapped in a marker; the note itself is never changed ([Exporting a note's colours](colour-codes.md#exporting-a-notes-colours)) |
+| In the editor's menu | On by default: *Copy with Augmented View highlights* in the menu when you right-click selected text in a note with a colour code. It copies the selection to the clipboard with each coloured sentence wrapped in a marker; the note is never changed ([Copying with highlights](colour-codes.md#copying-with-highlights)). Off: only the command *Copy selection with highlights* |
 | Marker format | `~={colour, category}text=~` (the default), or HTML: `<mark data-colour="…" data-category="…">text</mark>` |
 | Include phrases | Mark phrase colours too, inside their sentences' markers (default off: sentences only) |
-| Export folder | A folder in the vault for the exports. Empty: next to each note |
 
 ## What to send
 

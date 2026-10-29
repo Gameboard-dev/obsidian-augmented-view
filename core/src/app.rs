@@ -91,18 +91,11 @@ pub struct App {
     /// The settings' Rules section (rules_tab.rs): the code it shows, and the sentence in its test box.
     pub(crate) rules_code: usize,
     pub(crate) rules_test: String,
-    /// Exports the worker is preparing (export.rs), by request.
-    exports: HashMap<u32, Pending>,
+    /// Selections the worker is copying with their highlights (highlights.rs), by request: the note's path.
+    copies: HashMap<u32, String>,
 }
 
-/// An export on its way: the note, the new note it goes to, and whether the user has agreed to replace that one.
-struct Pending {
-    source: String,
-    target: String,
-    replace: bool,
-}
-
-/// Why a server stopped before loading when the GPU had no room: the user is asked what to do, so exports wait.
+/// Why a server stopped before loading when the GPU had no room: the user is asked what to do, so copies wait.
 const GPU_SHORT: &str = "not enough GPU memory";
 
 thread_local! {
@@ -190,7 +183,7 @@ pub fn start(plugin: JsValue, obs: JsValue, require: Function, module: JsValue, 
         key: JsValue::UNDEFINED,
         rules_code: 0,
         rules_test: String::new(),
-        exports: HashMap::new(),
+        copies: HashMap::new(),
         key_folder: false,
         plugin,
         obs,
@@ -263,107 +256,57 @@ fn on_worker(data: &JsValue) {
                 _ = js::wait(call!(ad, rename, from, to)).await;
             }
         }),
-        FromWorker::ExportWaiting { req, missing } => _ = with(|a| a.export_waiting(req, missing)),
-        FromWorker::Exported { req, text, markers, missing, ok } => js::spawn(write_export(req, text, markers, missing, ok)),
+        FromWorker::CopyWaiting { req, missing } => _ = with(|a| a.copy_waiting(req, missing)),
+        FromWorker::Copied { req, text, markers, missing, ok } => js::spawn(to_clipboard(req, text, markers, missing, ok)),
     }
 }
 
-/// The vault's file or folder at `path` (`Vault.getAbstractFileByPath`), if there is one.
-fn in_vault(vault: &JsValue, path: &str) -> Option<JsValue> {
-    Some(call!(vault, getAbstractFileByPath, path)).filter(JsValue::is_object)
+/// "Copy with Augmented View highlights" (highlights.rs; docs/colour-codes.md): an editor's selection (Live Preview or
+/// Source mode) with each coloured passage in a marker, to the clipboard. The worker computes first any colours the
+/// selected paragraphs lack, through the server, as the views do. Obsidian's Editor
+/// (<https://docs.obsidian.md/Reference/TypeScript+API/Editor>): getValue, getCursor, posToOffset (UTF-16 offsets, as
+/// the worker's).
+fn copy_from_editor(editor: &JsValue, path: String) {
+    let text = str(&call!(editor, getValue));
+    let at = |which: &str| call!(editor, posToOffset, call!(editor, getCursor, which)).as_f64().unwrap_or(0.0) as u32;
+    let (from, to) = (at("from"), at("to"));
+    if from < to {
+        with(|a| a.copy_selection(path, text, from, to));
+    }
 }
 
-/// The local date and time, `YYYY-MM-DD HH:MM`, for an export's header.
-fn local_stamp() -> String {
-    let d = new(&get(&js::global(), "Date"), &[]);
-    let n = |m: &str| js::invoke(&d, m, &[]).as_f64().unwrap_or(0.0) as u32;
-    format!("{}-{:02}-{:02} {:02}:{:02}", n("getFullYear"), n("getMonth") + 1, n("getDate"), n("getHours"), n("getMinutes"))
+/// Whether an editor (the editor menu's, a command's) has a selection in a note with a colour code, and the note's path.
+fn copyable(editor: &JsValue, info: &JsValue) -> Option<String> {
+    let path = str(&get(&get(info, "file"), "path"));
+    let selected = call!(editor, somethingSelected).is_truthy();
+    (selected && with(|a| a.code_id(&path).is_some()) == Some(true)).then_some(path)
 }
 
-/// "Export this note with its colours" (export.rs; docs/colour-codes.md): the note's text, with each coloured passage
-/// in a marker, as a new note next to it or in the export folder. Asks before replacing an export already there. The
-/// worker computes what colours the note lacks first, through the server, as the views do.
-async fn export_note(path: String) {
-    let Some(prep) = with(|a| a.export_prep(&path)) else { return };
-    let (vault, obs, app, target, code) = match prep {
-        Ok(x) => x,
-        Err(why) => {
-            with(|a| a.notice(&why, 10_000.0));
-            return;
-        }
+/// The worker's copy, to the clipboard (<https://developer.mozilla.org/en-US/docs/Web/API/Clipboard/writeText>).
+async fn to_clipboard(req: u32, text: String, markers: u32, missing: u32, ok: bool) {
+    if with(|a| a.copies.remove(&req)).flatten().is_none() {
+        return;
+    }
+    let say = |s: String| _ = with(|a| a.notice(&s, 8000.0));
+    if !ok {
+        return say("the note was closed before its highlights were ready, so nothing was copied.".into());
+    }
+    let clipboard = get(&get(&js::global(), "navigator"), "clipboard");
+    if let Err(e) = js::wait(call!(clipboard, writeText, text)).await {
+        return say(format!("could not copy to the clipboard ({}). Click in the note and try again.", str(&get(&e, "message"))));
+    }
+    let left = match missing {
+        0 => String::new(),
+        1 => " One paragraph had no colours yet (no server could compute them), so it is copied plain.".into(),
+        n => format!(" {n} paragraphs had no colours yet (no server could compute them), so they are copied plain."),
     };
-    let exists = in_vault(&vault, &target).is_some();
-    if exists {
-        let msg = format!("{target} already exists. Replace it with a new export of {path}? The note itself is not changed.");
-        if !js::ask(&obs, &app, "Replace the export?", &msg, "Replace", "Cancel").await {
-            return;
-        }
-    }
-    // the text an editor shows, if one shows the note; else the file's (the Vault API's read)
-    let text = match with(|a| a.editor_text(&path)).flatten() {
-        Some(t) => t,
-        None => match in_vault(&vault, &path) {
-            Some(file) => match js::wait(call!(vault, read, file)).await {
-                Ok(t) => str(&t),
-                Err(_) => {
-                    with(|a| a.notice(&format!("could not read {path}, so nothing was exported."), 8000.0));
-                    return;
-                }
-            },
-            None => return,
-        },
+    let what = match markers {
+        0 if missing == 0 => "copied; nothing in the selection is coloured, so it is plain text.".to_string(),
+        0 => "copied.".to_string(),
+        1 =>"copied with 1 highlighted passage.".to_string(),
+        n => format!("copied with {n} highlighted passages."),
     };
-    with(|a| {
-        a.send_doc(&path, text);
-        let req = a.next_id;
-        a.next_id += 1;
-        a.exports.insert(req, Pending { source: path.clone(), target, replace: exists });
-        a.post(&ToWorker::Export { req, path, header: crate::export::header(&code, &local_stamp()) });
-    });
-}
-
-/// The worker's export: written to its new note through the Vault API (`create`, after `createFolder` for each missing
-/// folder; `modify` for an export already there that the user agreed to replace). Never the note itself.
-async fn write_export(req: u32, text: String, markers: u32, missing: u32, ok: bool) {
-    let Some(Some((vault, obs, app, p))) = with(|a| a.exports.remove(&req).map(|p| (a.vault.clone(), a.obs.clone(), get(&a.plugin, "app"), p))) else { return };
-    let say = |s: String| _ = with(|a| a.notice(&s, 10_000.0));
-    if !ok || p.target == p.source {
-        return say(format!("could not export {}.", p.source));
-    }
-    let existing = in_vault(&vault, &p.target);
-    if existing.as_ref().is_some_and(|f| get(f, "children").is_object()) {
-        return say(format!("{} is a folder, so the export was not written.", p.target));
-    }
-    if existing.is_some() && !p.replace {
-        let msg = format!("{} has appeared since the export began. Replace it?", p.target);
-        if !js::ask(&obs, &app, "Replace the export?", &msg, "Replace", "Cancel").await {
-            return say(format!("the export of {} was not written.", p.source));
-        }
-    }
-    let written = match existing {
-        Some(file) => js::wait(call!(vault, modify, file, text)).await,
-        None => {
-            let mut dir = String::new();
-            for part in p.target.split('/').collect::<Vec<_>>().split_last().map_or(&[][..], |(_, d)| d) {
-                dir = if dir.is_empty() { part.to_string() } else { format!("{dir}/{part}") };
-                if in_vault(&vault, &dir).is_none() {
-                    _ = js::wait(call!(vault, createFolder, dir.clone())).await;
-                }
-            }
-            js::wait(call!(vault, create, p.target.clone(), text)).await
-        }
-    };
-    match written {
-        Err(e) => say(format!("could not write {}: {}", p.target, str(&get(&e, "message")))),
-        Ok(_) => {
-            let left = match missing {
-                0 => String::new(),
-                1 => " One paragraph had no colours yet (the server was not available), so it is left plain.".into(),
-                n => format!(" {n} paragraphs had no colours yet (the server was not available), so they are left plain."),
-            };
-            say(format!("exported {} to {} with {markers} coloured passages.{left}", p.source, p.target));
-        }
-    }
+    say(format!("{what}{left}"));
 }
 
 /// The vault's file access: <https://docs.obsidian.md/Reference/TypeScript+API/DataAdapter> (exists, readBinary, writeBinary, mkdir, list, remove, rename).
@@ -604,13 +547,23 @@ async fn stop_server() {
     });
 }
 
-/// The editor's context menu, shown only when a few words are selected (bold::term): "Always mark as a key term" (or
-/// "Stop always marking as a key term" for one already listed) adds them to *Always mark*, or takes them out. The
+/// The editor's context menu, when text is selected: "Copy with Augmented View highlights" in a note with a colour
+/// code; and, when a few words are selected (bold::term), "Always mark as a key term" (or
+/// "Stop always marking as a key term" for one already listed), which adds them to *Always mark*, or takes them out. The
 /// menu: `editor-menu` (<https://docs.obsidian.md/Reference/TypeScript+API/Workspace/on('editor-menu')>); the selection:
 /// <https://docs.obsidian.md/Reference/TypeScript+API/Editor> (somethingSelected, getSelection).
-fn editor_menu(menu: JsValue, editor: JsValue, _view: JsValue) -> JsValue {
+fn editor_menu(menu: JsValue, editor: JsValue, view: JsValue) -> JsValue {
     if !call!(editor, somethingSelected).is_truthy() {
         return JsValue::UNDEFINED;
+    }
+    // "Copy with Augmented View highlights" (highlights.rs), unless hidden in the settings: in a note with a colour code
+    if let Some(path) = copyable(&editor, &view).filter(|_| with(|a| a.settings.highlight_menu) == Some(true)) {
+        let editor = editor.clone();
+        call!(menu, addItem, f1(move |item| {
+            let (editor, path) = (editor.clone(), path.clone());
+            call!(call!(item, setTitle, "Copy with Augmented View highlights"), setIcon, "clipboard-copy");
+            call!(item, onClick, f0(move || copy_from_editor(&editor, path.clone())))
+        }));
     }
     if let Some(term) = crate::bold::term(&str(&call!(editor, getSelection))) {
         let listed = with(|a| crate::bold::listed(&a.settings.bold_terms, &term)) == Some(true);
@@ -801,29 +754,18 @@ impl App {
         command("toggle-emphasis", "Show or hide emphasis", f0(|| _ = with(|a| a.flip("enabled"))));
         command("more", "More emphasis", f0(|| _ = with(|a| a.nudge(0.1))));
         command("less", "Less emphasis", f0(|| _ = with(|a| a.nudge(-0.1))));
-        // Export: listed only while the setting is on (a check callback, <https://docs.obsidian.md/Reference/TypeScript+API/Command/checkCallback>)
-        let export_check = f1(|checking| {
-            let path = with(|a| a.settings.export_colours.then(|| a.active_note()).flatten()).flatten();
+        // Copy with highlights, for the keyboard: listed while an editor has a selection in a coloured note (an editor
+        // check callback, <https://docs.obsidian.md/Reference/TypeScript+API/Command/editorCheckCallback>)
+        let copy_check = f3(|checking, editor, info| {
+            let path = copyable(&editor, &info);
             if let (Some(p), false) = (&path, checking.is_truthy()) {
-                js::spawn(export_note(p.clone()));
+                copy_from_editor(&editor, p.clone());
             }
             path.is_some().into()
         });
-        call!(p, addCommand, obj! { id: "export-colours", name: "Export this note with its colours", checkCallback: export_check });
+        call!(p, addCommand, obj! { id: "copy-with-highlights", name: "Copy selection with highlights", editorCheckCallback: copy_check });
         call!(p, registerEvent, call!(get(&get(&p, "app"), "workspace"), on, "editor-menu", f3(editor_menu)));
         let workspace = get(&get(&p, "app"), "workspace");
-        // and in a note's file menu (<https://docs.obsidian.md/Reference/TypeScript+API/Workspace/on('file-menu')>)
-        call!(p, registerEvent, call!(workspace, on, "file-menu", f2(|menu, file| {
-            let path = str(&get(&file, "path"));
-            if str(&get(&file, "extension")) == "md" && with(|a| a.settings.export_colours) == Some(true) {
-                call!(menu, addItem, f1(move |item| {
-                    let path = path.clone();
-                    call!(call!(item, setTitle, "Export this note with its colours"), setIcon, "palette");
-                    call!(item, onClick, f0(move || js::spawn(export_note(path.clone()))))
-                }));
-            }
-            JsValue::UNDEFINED
-        })));
         for event in ["active-leaf-change", "file-open"] {
             call!(p, registerEvent, call!(workspace, on, event, f0(|| _ = with(|a| a.refresh_key()))));
         }
@@ -995,7 +937,7 @@ impl App {
         crate::models::section(self);
         self.colour_settings(tab);
         crate::rules_tab::section(self, tab);
-        self.export_settings(tab);
+        self.copy_settings(tab);
     }
 
     /// Whether this device may start the server (desktop Obsidian outside a sandbox).
@@ -1012,47 +954,45 @@ impl App {
         self.settings.colour_codes.iter().any(|c| !crate::colours::model_phrases(c).is_empty())
     }
 
-    // ----- exporting a note's colours (export.rs)
+    // ----- copying a selection with its highlights (highlights.rs)
 
-    /// What an export of `path` needs: the vault, Obsidian, the app, where it goes (through `normalizePath`,
-    /// <https://docs.obsidian.md/Reference/TypeScript+API/normalizePath>) and the note's code's name; or why it cannot be.
-    #[allow(clippy::type_complexity)]
-    fn export_prep(&self, path: &str) -> Result<(JsValue, JsValue, JsValue, String, String), String> {
-        let crate::colours::Assigned::Code(i) = self.assigned(path) else {
-            return Err("this note has no colour code, so it has no colours to export. Choose one in the floating key first.".into());
-        };
-        let target = crate::export::export_path(path, &self.settings.export_folder)
-            .ok_or_else(|| format!("the export folder \u{201c}{}\u{201d} must be a folder inside the vault, without . or .. (Settings \u{2192} Export).", self.settings.export_folder.trim()))?;
-        let normalize = get(&self.obs, "normalizePath");
-        let target = if normalize.is_function() { str(&js::apply(&normalize, &JsValue::NULL, &[target.into()])) } else { target };
-        if target == path || target.is_empty() {
-            return Err("the export would replace the note itself, so nothing was exported.".into());
+    /// The selection [from, to) of `path`, whose text an editor shows (`text`), to the worker, which copies it with its
+    /// highlights once its paragraphs' colours are in.
+    fn copy_selection(&mut self, path: String, text: String, from: u32, to: u32) {
+        if self.code_id(&path).is_none() {
+            return self.notice("this note has no colour code, so it has no highlights to copy. Choose one in the floating key first.", 8000.0);
         }
-        Ok((self.vault.clone(), self.obs.clone(), get(&self.plugin, "app"), target, self.settings.colour_codes[i].name.clone()))
+        self.send_doc(&path, text);
+        let req = self.next_id;
+        self.next_id += 1;
+        self.copies.insert(req, path.clone());
+        self.post(&ToWorker::Copy { req, path, from, to });
     }
 
-    /// The worker waits for colours an export lacks: say so, and start the server if it is not running (the same start
-    /// as the status bar's, so the GPU's checks and the question when it has no room apply).
-    fn export_waiting(&mut self, req: u32, missing: u32) {
-        let Some(p) = self.exports.get(&req) else { return };
+    /// The worker waits for colours a copy lacks: say so, and start the server if it is not running (the same start as
+    /// the status bar's, so the GPU's checks and the question when it has no room apply).
+    fn copy_waiting(&mut self, req: u32, missing: u32) {
+        if !self.copies.contains_key(&req) {
+            return;
+        }
         let n = if missing == 1 { "1 paragraph".to_string() } else { format!("{missing} paragraphs") };
         let running = matches!(self.state, State::Running | State::Starting);
         let then = if running { "through the server" } else { "starting the server" };
-        self.notice(&format!("computing the colours of {n} of {} first ({then}); the export follows when they are in.", p.source), 8000.0);
+        self.notice(&format!("computing the colours of {n} of the selection first ({then}); it is copied when they are in."), 8000.0);
         if !running {
             js::spawn(start_server());
         }
     }
 
-    /// No server to compute what the exports lack: the worker writes them with the colours there are.
-    fn finish_exports(&self) {
-        for req in self.exports.keys() {
-            self.post(&ToWorker::ExportNow(*req));
+    /// No server to compute what the copies lack: the worker makes them with the colours there are.
+    fn finish_copies(&self) {
+        for req in self.copies.keys() {
+            self.post(&ToWorker::CopyNow(*req));
         }
     }
 
-    /// The Export section of the settings, under the colour codes and their rules.
-    fn export_settings(&self, tab: &JsValue) {
+    /// The "Copy with highlights" section of the settings, under the colour codes and their rules.
+    fn copy_settings(&self, tab: &JsValue) {
         let el = get(tab, "containerEl");
         let setting = get(&self.obs, "Setting");
         let row = |name: &str, desc: &str| {
@@ -1064,25 +1004,17 @@ impl App {
             with(|a| a.set_field(key, v));
             JsValue::UNDEFINED
         });
-        call!(row("Export", ""), setHeading);
-        let s = row("Export colours", "Adds the command Export this note with its colours (also in a note's file menu): a new note, \u{201c}<name> (colours).md\u{201d}, with each coloured sentence of the note wrapped in a marker, in the colours the note shows (its colour code, the sensitivity, the rules). Colours not yet computed are computed first, through the server. The note itself is never changed.");
-        let (on, phrases, format, folder) = (self.settings.export_colours, self.settings.export_phrases, self.settings.export_format.clone(), self.settings.export_folder.clone());
-        call!(s, addToggle, f1(move |t| call!(call!(t, setValue, on), onChange, changed("exportColours"))));
+        call!(row("Copy with highlights", ""), setHeading);
+        let s = row("In the editor's menu", "Show Copy with Augmented View highlights when you right-click selected text in a note with a colour code. It copies the selection with each coloured sentence wrapped in a marker, in the colours the note shows (its colour code, the sensitivity, the rules); colours not yet computed are computed first, through the server. Off: only the command Copy selection with highlights. The note is never changed.");
+        let (on, phrases, format) = (self.settings.highlight_menu, self.settings.highlight_phrases, self.settings.highlight_format.clone());
+        call!(s, addToggle, f1(move |t| call!(call!(t, setValue, on), onChange, changed("highlightMenu"))));
         let s = row("Marker format", "~={colour, category}text=~, or HTML: <mark data-colour=\"\u{2026}\" data-category=\"\u{2026}\">text</mark>.");
         call!(s, addDropdown, f1(move |d| {
             call!(call!(d, addOption, "tilde", "~={colour, category}text=~"), addOption, "html", "<mark> (HTML)");
-            call!(call!(d, setValue, format.clone()), onChange, changed("exportFormat"))
+            call!(call!(d, setValue, format.clone()), onChange, changed("highlightFormat"))
         }));
         let s = row("Include phrases", "Mark phrase colours (key terms, citations and the like) too, inside their sentences' markers. Off: sentences only.");
-        call!(s, addToggle, f1(move |t| call!(call!(t, setValue, phrases), onChange, changed("exportPhrases"))));
-        let s = row("Export folder", "A folder in the vault for the exports. Empty: next to each note.");
-        call!(s, addText, f1(move |t| {
-            call!(call!(t, setValue, folder.clone()), setPlaceholder, "Next to the note");
-            call!(t, onChange, f1(|v| {
-                with(|a| a.set_field("exportFolder", str(&v).trim().into()));
-                JsValue::UNDEFINED
-            }))
-        }));
+        call!(s, addToggle, f1(move |t| call!(call!(t, setValue, phrases), onChange, changed("highlightPhrases"))));
     }
 
     /// Each colour code: its name, a row per colour (name, colour, how it marks, opacity, dark-theme colour, what it
@@ -1315,7 +1247,7 @@ impl App {
         self.state = state;
         self.server_changed();
         if matches!(state, State::Stopped | State::Failed) && detail != GPU_SHORT {
-            self.finish_exports(); // no server to compute what they lack (the GPU's shortage waits for the user's answer)
+            self.finish_copies(); // no server to compute what they lack (the GPU's shortage waits for the user's answer)
         }
         if state == State::Stopped && !detail.is_empty() && detail != said {
             self.notice(&format!("the server is not running: {detail}"), 15_000.0); // why a start did nothing
@@ -1538,7 +1470,7 @@ impl App {
                     a.state = State::Stopped;
                     a.detail = "the models are not downloaded yet (Settings \u{2192} Models)".into();
                     a.server_changed();
-                    a.finish_exports();
+                    a.finish_copies();
                     a.log("server Stopped: models not downloaded yet (exit 4)");
                     js::timeout(0.0, move || crate::models::on_exit_missing(missing));
                     return;
@@ -1661,7 +1593,7 @@ async fn gpu_choice(short: serde_json::Value) {
             a.gpu_mode = m.into();
             a.spawn_server(0);
         }),
-        None => _ = with(|a| a.finish_exports()), // left stopped: exports are written with the colours there are
+        None => _ = with(|a| a.finish_copies()), // left stopped: copies are made with the colours there are
     }
 }
 

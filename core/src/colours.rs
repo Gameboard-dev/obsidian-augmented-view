@@ -341,7 +341,7 @@ pub fn stylesheet(code: &ColourCode) -> String {
 
 /// The colour of the code a mark of kind `k` is drawn in, as the stylesheet draws it: a sentence's or phrase's colour
 /// by its place, any other kind in the first colour that shows it; None when nothing is drawn (no such colour, one
-/// hidden in the floating key, or one whose hex is not a colour). Used by the export (export.rs).
+/// hidden in the floating key, or one whose hex is not a colour). Used by the copy with highlights (highlights.rs).
 pub fn colour_of_kind(code: &ColourCode, k: u8) -> Option<usize> {
     let i = if k >= crate::pick::COLOUR {
         (k - crate::pick::COLOUR) as usize
@@ -368,7 +368,7 @@ mod tests {
         assert_eq!(colour_of_kind(&code, STRESS), None, "no colour shows contrast words");
         assert_eq!(colour_of_kind(&code, COLOUR + 20), None);
         code.colours[3].hidden = true;
-        assert_eq!(colour_of_kind(&code, COLOUR + 3), None, "hidden in the key: not drawn, not exported");
+        assert_eq!(colour_of_kind(&code, COLOUR + 3), None, "hidden in the key: not drawn, not copied");
     }
 
     #[test]

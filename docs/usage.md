@@ -20,7 +20,10 @@ Click it for a menu: *Start* or *Stop the server*, the readings, *Show* or *Hide
 
 ## Commands
 
-*Start or stop the server*, *Show or hide emphasis*, *More emphasis*, *Less emphasis*. None has a default hotkey.
+*Start or stop the server*, *Show or hide emphasis*, *More emphasis*, *Less emphasis*, and, with text selected in an
+editor, *Copy selection with highlights* ([Copying with highlights](colour-codes.md#copying-with-highlights): the
+selection to the clipboard with its colours as markers, also in the editor's right-click menu). None has a default
+hotkey.
 
 ## The floating key
 

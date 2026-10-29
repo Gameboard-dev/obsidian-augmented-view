@@ -14,7 +14,7 @@ mod cache;
 mod colours;
 mod editor;
 mod engine;
-mod export;
+mod highlights;
 mod key;
 mod models;
 mod msg;

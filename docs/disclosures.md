@@ -76,9 +76,7 @@ to programs on your own computer, never to the internet, and happens only after 
 ## Files outside the vault
 
 The plugin itself writes only inside its own folder in the vault (`.obsidian/plugins/augmented-view/`: its settings,
-its per-note cache and an optional debug log) and in Obsidian's local storage (the settings kept on this device only),
-and, only when you use *Export this note with its colours* (off by default), the exported note where you choose in the
-vault, through Obsidian's Vault API.
+its per-note cache and an optional debug log) and in Obsidian's local storage (the settings kept on this device only).
 The server, being a program of its own, uses these places outside the vault, each for a stated reason:
 
 - **The server program**, which you download and place yourself: by default in the plugin's folder (inside the vault),

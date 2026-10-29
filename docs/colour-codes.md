@@ -8,7 +8,7 @@
 - [Linking codes to notes](#linking-codes-to-notes)
 - [What the models are told](#what-the-models-are-told)
 - [Rules](#rules)
-- [Exporting a note's colours](#exporting-a-notes-colours)
+- [Copying with highlights](#copying-with-highlights)
 
 ## Colour codes
 
@@ -139,28 +139,27 @@ matches empty text is refused (it would match every sentence), and each is compi
 | a signposts colour | Force, pattern `^(Another\|A further\|A second) \w+ (is\|concerns)` | "Another consideration is how the codes are spaced." |
 | a methods limitations colour | Force, words `threat, threats, confound, confounds` | "Three threats lie in the data." |
 
-## Exporting a note's colours
+## Copying with highlights
 
-Off by default. Turn on **Export colours** (Settings → Augmented View → Export), and the command **Export this note
-with its colours** appears in the command palette and in a note's file menu. It writes a **new** note with the note's
-text, each coloured sentence wrapped in a marker; the note itself is never changed.
+Select text in a note that has a colour code (Live Preview or Source mode), right-click it and choose **Copy with
+Augmented View highlights**. The selection is copied to the clipboard as Markdown, with each coloured sentence wrapped
+in a marker. Keyboard users can run the command **Copy selection with highlights** (give it a hotkey under Settings →
+Hotkeys). The note is never changed, and nothing is written anywhere but the clipboard. Reading view has no editor
+selection to copy from, so the item is not shown there: switch to Live Preview to copy.
 
-- **Which colours.** The ones the editor shows for the note: its colour code, the sensitivity, the rules. Colours
-  hidden in the floating key are left out, as they are not drawn. Phrase colours (key terms, citations and the like)
-  are left out unless **Include phrases** is on; then they are marked inside their sentences' markers. Hiding emphasis
-  (*Show emphasis* off) does not empty an export.
-- **Colours not computed yet.** Paragraphs the server has not coloured yet (the note was never scrolled through, say)
-  are sent first, all of them, in the same requests the views make, so the same GPU settings apply. A notice says how
-  many paragraphs it is waiting for, and the server is started if it is not running (as the status bar's *Start* does,
-  with its question when the GPU has no room). If no server can answer, the export is written with the colours there
-  are, and the notice says how many paragraphs were left plain.
-- **Where it goes.** `<note's name> (colours).md` next to the note, or in **Export folder**, a folder in the vault that
-  you type (it is made if it does not exist). An export already there is replaced only after you say so. Files are
-  written through Obsidian's Vault API, inside the vault only.
-- **What else changes.** Nothing: uncoloured sentences stay as they are, and the export opens with one line saying
-  which colour code was used and when (`Colours exported by Augmented View with the colour code "Reading" on
-  2026-10-29 14:05.`, after the note's properties if it has any). The properties are copied as they are, so an export
-  of a note with aliases has the same aliases.
+- **Which colours.** The ones the editor shows for those lines: the note's colour code, the sensitivity, the rules.
+  Colours hidden in the floating key are left out, as they are not drawn. Phrase colours (key terms, citations and the
+  like) are left out unless **Include phrases** is on; then they are marked inside their sentences' markers. Hiding
+  emphasis (*Show emphasis* off) does not empty a copy. Uncoloured sentences are copied as they are.
+- **Part of a sentence.** Where the selection starts or ends inside a coloured sentence, the marker covers only the
+  selected part.
+- **Colours not computed yet.** Paragraphs of the selection that the server has not coloured yet (you selected further
+  than you had scrolled, say) are sent first, in the same requests the views make, so the same GPU settings apply. A
+  notice says how many paragraphs it is waiting for, and the server is started if it is not running (as the status
+  bar's *Start* does, with its question when the GPU has no room). If no server can answer, the selection is copied
+  with the colours there are, and the notice says how many paragraphs were copied plain.
+- **The menu item** can be hidden (Settings → Augmented View → Copy with highlights → *In the editor's menu*); the
+  command stays.
 
 **Markers.** *Marker format* chooses between two forms. The colour is the colour's hex as its code defines it, the
 category its name:
@@ -180,18 +179,23 @@ escaped, and a stray `<`, `>` or `&` in the marked text is written as an entity 
 same character; code, links and HTML tags are left as they are.
 
 No Obsidian plugin we know of uses `~={…}…=~`: the coloured-highlight plugins write a colour inside Obsidian's own
-highlight, `=={colour}text==` (Extended Markdown Syntax, Style Obmd, Hilo), so the export does not use `==`, and an
-exported note shows its markers as plain text unless something reads them.
+highlight, `=={colour}text==` (Extended Markdown Syntax, Style Obmd, Hilo), so the copy does not use `==`, and
+pasted text shows its markers as plain text unless something reads them.
 
 **The Markdown stays intact.** A marker covers only the text of a line, so it never takes in:
 
-- front matter, code blocks, maths blocks, `%%` and `<!-- -->` comment blocks, dividers, embeds or block-id lines;
+- front matter, code blocks, maths blocks, `%%` and `<!-- -->` comment blocks, dividers, embeds or block-id lines (a
+  selection inside one is copied plain);
 - a line's indent, blockquote `>`, callout header, list marker, task box, heading `#`, footnote label, a trailing
-  block id (` ^id`) or its line break: a sentence over two lines gets a marker on each;
+  block id (` ^id`) or its line break: a selection over several lines or list items gets a marker on each line;
 - part of inline code, inline maths, a comment, a link or embed (its target or its text), a footnote, a citation, an
-  HTML tag or a bare URL: a marker that would start or end inside one takes all of it;
-- a table's `|`: the marker is split around it.
+  HTML tag or a bare URL: a marker that would start or end inside one takes all of it, and where the selection itself
+  cuts through one, the cut piece is left outside the marker (a selection inside inline code is copied plain);
+- a table's `|`: the marker is split around it, so a selection across table rows keeps every cell's pipes.
+
+For example, with "Detectors fail on new data." coloured as Claims, selecting from "fail" to the end of the next
+sentence copies `~={#FFD2D2, Claims}fail on new data.=~ The datasets are small.`
 
 Where a phrase would cross the end of its sentence, it is split there. Where a `~=` marker would touch a `~` or an `=`
 and make `~~` (strikethrough) or `==` (a highlight) that was not in the note, an empty HTML comment, `<!---->`, which
-Obsidian does not show, is put between them. The code is `core/src/export.rs`.
+Obsidian does not show, is put between them. The code is `core/src/highlights.rs`.

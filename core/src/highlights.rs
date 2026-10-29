@@ -1,8 +1,8 @@
-//! Export a note with its colours (docs/colour-codes.md, "Exporting a note's colours"): the note's Markdown with each
-//! coloured passage wrapped in a marker, `~={colour, category}text=~` (the default) or
-//! `<mark data-colour="…" data-category="…">text</mark>`. [`write`] is a pure function of the note's text and the
-//! marks the worker computed for it (the same ones the editor draws), so the original note is never touched: the main
-//! thread writes the result to a new note through Obsidian's Vault API.
+//! Copy with Augmented View highlights (docs/colour-codes.md, "Copying with highlights"): a selection's Markdown with
+//! each coloured passage wrapped in a marker, `~={colour, category}text=~` (the default) or
+//! `<mark data-colour="…" data-category="…">text</mark>`, for the clipboard. [`write_range`] is a pure function of the
+//! note's text, the selection and the marks the worker computed for it (the same ones the editor draws): the note is
+//! never changed, and nothing is written but the clipboard.
 //!
 //! Markers never break the Markdown around them:
 //! - nothing is marked in front matter, code blocks, maths blocks, comment blocks, dividers, embeds or block-id lines;
@@ -10,7 +10,9 @@
 //!   heading `#`, footnote label, a trailing block id (` ^id`) or the line break: a passage over several lines gets a
 //!   marker on each line;
 //! - a marker never starts or ends inside inline code, inline maths, a comment, a link or embed (its target and its
-//!   text), a footnote, a citation, an HTML tag or a bare URL: it grows to take the whole of it;
+//!   text), a footnote, a citation, an HTML tag or a bare URL: it grows to take the whole of it, or, where the
+//!   selection itself cuts through one, leaves the cut piece out;
+//! - a selection inside a code block, maths or a comment is copied as it is, without markers;
 //! - an unescaped `|` (a table's cells) stays outside: the marker is split around it;
 //! - markers nest (a phrase inside its sentence); where two would cross, the later one is split at the earlier one's end;
 //! - with the `~=` markers, where a marker would touch a `~` or `=` and make `~~` (strikethrough) or `==` (a highlight)
@@ -56,14 +58,27 @@ pub struct Named {
 /// Between a marker and a `~` or `=` it would otherwise touch (see the module's notes).
 const SEPARATOR: &str = "<!---->";
 
-/// The note's text with its marks as markers, and how many markers were written. Marks outside the text, of no
-/// colour in `colours`, or only over structure (a list marker, a heading's `#`) write nothing.
+/// The whole text with its marks as markers (the tests' shorthand for [`write_range`] over all of it).
+#[cfg(test)]
 pub fn write(text: &str, marks: &[Mark], colours: &[Named], format: Format) -> (String, usize) {
+    write_range(text, marks, colours, format, 0, u32::MAX)
+}
+
+/// The text [from, to) (UTF-16 offsets: a selection) with its marks as markers, and how many markers were written. The
+/// note's whole text is given, so that what surrounds the selection (a code block opened above it, the line's list
+/// marker) is known. A mark is cut to the selection; where the selection cuts through a link, code or another atom,
+/// the marker leaves the cut piece out rather than take in what was not selected. Marks of no colour in `colours`, or
+/// only over structure (a list marker, a heading's `#`), write nothing.
+pub fn write_range(text: &str, marks: &[Mark], colours: &[Named], format: Format, from: u32, to: u32) -> (String, usize) {
     let lines = lines(text);
     let conv = Utf16::new(text);
+    let (sa, se) = (conv.byte(from), conv.byte(to.max(from)));
     let mut pieces: Vec<Piece> = Vec::new();
     for m in marks.iter().filter(|m| m.colour < colours.len() && m.from < m.to) {
-        let (from, to) = (conv.byte(m.from), conv.byte(m.to));
+        let (from, to) = (conv.byte(m.from).max(sa), conv.byte(m.to).min(se));
+        if from >= to {
+            continue;
+        }
         let first = lines.partition_point(|l| l.end <= from);
         for l in &lines[first..] {
             if l.start >= to {
@@ -75,12 +90,16 @@ pub fn write(text: &str, marks: &[Mark], colours: &[Named], format: Format) -> (
                 continue;
             }
             for &(s, t) in &c.atoms {
+                // a boundary inside an atom takes all of it, or, where the selection cuts the atom, none of it
                 if s < a && a < t {
-                    a = s;
+                    a = if s >= sa { s } else { t };
                 }
                 if s < e && e < t {
-                    e = t;
+                    e = if t <= se { t } else { s };
                 }
+            }
+            if a >= e {
+                continue;
             }
             let mut start = a;
             for &p in c.pipes.iter().filter(|&&p| p >= a && p < e) {
@@ -92,39 +111,7 @@ pub fn write(text: &str, marks: &[Mark], colours: &[Named], format: Format) -> (
     }
     let pieces = nest(text, merge(pieces));
     let atoms: Vec<(usize, usize)> = lines.iter().filter_map(|l| l.content.as_ref()).flat_map(|c| c.atoms.iter().copied()).collect();
-    (emit(text, &pieces, colours, format, &atoms), pieces.len())
-}
-
-/// The export's opening line: which colour code, and when (no names, no paths).
-pub fn header(code: &str, when: &str) -> String {
-    let code: String = code.chars().filter(|c| !c.is_control()).collect();
-    format!("Colours exported by Augmented View with the colour code \u{201c}{}\u{201d} on {when}.", code.trim())
-}
-
-/// The text with `header` as its first line, after the front matter if it has one (so its properties stay valid),
-/// and a blank line after it.
-pub fn with_header(text: &str, header: &str) -> String {
-    let fm_end = front_matter_end(text);
-    let (fm, rest) = text.split_at(fm_end);
-    let fm = if !fm.is_empty() && !fm.ends_with('\n') { format!("{fm}\n") } else { fm.to_string() };
-    format!("{fm}{header}\n\n{rest}")
-}
-
-/// Where a note's export goes: `<note's name> (colours).md` next to the note, or in `folder` (vault-relative, as the
-/// user typed it; the caller passes the result through Obsidian's `normalizePath`). None for a folder that climbs out
-/// (`..`) or names the current folder (`.`). Never the note itself.
-pub fn export_path(note: &str, folder: &str) -> Option<String> {
-    let name = note.rsplit('/').next().filter(|n| !n.is_empty())?;
-    let stem = name.strip_suffix(".md").unwrap_or(name);
-    let file = format!("{stem} (colours).md");
-    let folder = folder.trim().replace('\\', "/");
-    let folder = folder.trim_matches('/');
-    if folder.split('/').any(|p| p == ".." || p == ".") {
-        return None;
-    }
-    let dir = if folder.is_empty() { note.rfind('/').map_or("", |i| &note[..i]) } else { folder };
-    let path = if dir.is_empty() { file } else { format!("{dir}/{file}") };
-    (path != note).then_some(path)
+    (emit(text, &pieces, colours, format, &atoms, (sa, se)), pieces.len())
 }
 
 // ----- lines and what in them may be marked
@@ -581,7 +568,8 @@ impl Out {
     }
 }
 
-fn emit(text: &str, pieces: &[Piece], colours: &[Named], format: Format, atoms: &[(usize, usize)]) -> String {
+/// The text [range) with the pieces (all inside it) as markers.
+fn emit(text: &str, pieces: &[Piece], colours: &[Named], format: Format, atoms: &[(usize, usize)], (start, end): (usize, usize)) -> String {
     // (position, closes before opens, inner closes first and outer opens first, piece)
     let mut events: Vec<(usize, u8, u32, usize)> = Vec::with_capacity(pieces.len() * 2);
     for (i, p) in pieces.iter().enumerate() {
@@ -589,8 +577,8 @@ fn emit(text: &str, pieces: &[Piece], colours: &[Named], format: Format, atoms: 
         events.push((p.e, 0, u32::MAX - p.depth, i));
     }
     events.sort_unstable();
-    let mut out = Out { s: String::with_capacity(text.len() + pieces.len() * 48), format, last_marker: false };
-    let (mut pos, mut open_now) = (0usize, 0u32);
+    let mut out = Out { s: String::with_capacity(end - start + pieces.len() * 48), format, last_marker: false };
+    let (mut pos, mut open_now) = (start, 0u32);
     for (at, kind, _, i) in events {
         if at > pos {
             let seg = text_out(text, pos, at, format == Format::Html && open_now > 0, atoms);
@@ -605,8 +593,8 @@ fn emit(text: &str, pieces: &[Piece], colours: &[Named], format: Format, atoms: 
             open_now -= 1;
         }
     }
-    if pos < text.len() {
-        let seg = text_out(text, pos, text.len(), false, atoms);
+    if pos < end {
+        let seg = text_out(text, pos, end, false, atoms);
         out.push(&seg, false);
     }
     out.s
@@ -826,27 +814,43 @@ mod tests {
         assert_eq!(conv.byte(to16(text.len()) + 5), text.len());
     }
 
-    #[test]
-    fn the_header_goes_after_the_front_matter() {
-        let h = header("Reading\n", "2026-10-29 14:05");
-        assert_eq!(h, "Colours exported by Augmented View with the colour code \u{201c}Reading\u{201d} on 2026-10-29 14:05.");
-        assert_eq!(with_header("Text.", "H."), "H.\n\nText.");
-        assert_eq!(with_header("---\na: 1\n---\nText.", "H."), "---\na: 1\n---\nH.\n\nText.");
-        assert_eq!(with_header("---\nnot closed", "H."), "H.\n\n---\nnot closed");
+    /// The selection `what` (its first occurrence) of an ASCII text, with every line marked in the first colour.
+    fn copy(text: &str, what: &str, marks: &[Mark]) -> String {
+        let a = text.find(what).unwrap_or_else(|| panic!("{what:?} not in {text:?}"));
+        write_range(text, marks, &colours(), Format::Tilde, a as u32, (a + what.len()) as u32).0
     }
 
     #[test]
-    fn exports_go_next_to_the_note_or_into_the_folder_and_never_onto_it() {
-        assert_eq!(export_path("Library/paper.md", "").as_deref(), Some("Library/paper (colours).md"));
-        assert_eq!(export_path("top.md", " ").as_deref(), Some("top (colours).md"));
-        assert_eq!(export_path("a/b/note.md", "/Exports/").as_deref(), Some("Exports/note (colours).md"));
-        assert_eq!(export_path("a/b/note.md", "Exports\\Colours").as_deref(), Some("Exports/Colours/note (colours).md"));
-        assert_eq!(export_path("a/note.md", "../outside"), None, "never out of the vault");
-        assert_eq!(export_path("a/note.md", "x/./y"), None);
-        assert_eq!(export_path("a/note (colours).md", "a").as_deref(), Some("a/note (colours) (colours).md"));
-        for (note, folder) in [("n.md", ""), ("a/n.md", "a"), ("a/n.md", "a/"), ("x (colours).md", "")] {
-            assert_ne!(export_path(note, folder).as_deref(), Some(note));
-        }
+    fn a_selection_keeps_markers_on_its_own_part_of_a_sentence() {
+        let text = "Detectors fail on new data. They work at home. Then stop.";
+        let marks = [over(text, "Detectors fail on new data.", 0), over(text, "They work at home.", 0), over(text, "new data", 1)];
+        assert_eq!(copy(text, "fail on new data. They work", &marks), format!("{C}fail on {K}new data=~.=~ {C}They work=~"));
+        assert_eq!(copy(text, "w da", &marks), format!("{C}{K}w da=~=~"), "inside a phrase inside a sentence");
+        assert_eq!(copy(text, "Then stop.", &marks), "Then stop.", "an uncoloured sentence: as it is");
+        assert_eq!(copy(text, "", &marks), "", "an empty selection");
+    }
+
+    #[test]
+    fn a_selection_cutting_through_a_link_or_code_leaves_the_cut_piece_outside() {
+        let text = "Read [[target|the alias]] and `a b` here.";
+        let all = all(text);
+        assert_eq!(copy(text, "alias]] and `a b` here.", &all), format!("alias]] {C}and `a b` here.=~"));
+        assert_eq!(copy(text, "Read [[target|the", &all), format!("{C}Read=~ [[target|the"));
+        assert_eq!(copy(text, "a b", &all), "a b", "inside inline code: plain");
+        assert_eq!(copy(text, "[[target|the alias]]", &all), format!("{C}[[target|the alias]]=~"), "a whole link: taken whole");
+    }
+
+    #[test]
+    fn a_selection_over_list_items_table_rows_and_code_blocks() {
+        let text = "- first item\n- second item";
+        assert_eq!(copy(text, "item\n- second", &all(text)), format!("{C}item=~\n- {C}second=~"));
+        let text = "| a b | c d |\n|---|---|\n| e | f |";
+        assert_eq!(copy(text, "b | c d |\n|---|---|\n| e", &all(text)), format!("{C}b=~ | {C}c d=~ |\n|---|---|\n| {C}e=~"));
+        let text = "Para one.\n```\ncode here\n```\nPara two.";
+        assert_eq!(copy(text, "code here", &all(text)), "code here", "inside a code block: plain");
+        assert_eq!(copy(text, "one.\n```\ncode here\n```\nPara", &all(text)), format!("{C}one.=~\n```\ncode here\n```\n{C}Para=~"));
+        let text = "$$\nx = y\n$$\nText.";
+        assert_eq!(copy(text, "x = y", &all(text)), "x = y", "inside maths: plain");
     }
 
     #[test]

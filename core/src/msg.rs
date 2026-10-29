@@ -44,14 +44,13 @@ pub struct Settings {
     pub colour_codes: Vec<crate::colours::ColourCode>,
     /// Which code applies to which notes and folders (colours::assigned).
     pub links: Vec<crate::colours::Link>,
-    /// The command "Export this note with its colours" (export.rs; docs/colour-codes.md): off by default.
-    pub export_colours: bool,
+    /// "Copy with Augmented View highlights" in the editor's context menu (highlights.rs; docs/colour-codes.md): shown
+    /// by default; the command is there either way.
+    pub highlight_menu: bool,
     /// The markers: "tilde" (`~={colour, category}text=~`) or "html" (`<mark data-colour data-category>`).
-    pub export_format: String,
+    pub highlight_format: String,
     /// Phrase colours too, not only sentences'.
-    pub export_phrases: bool,
-    /// Where exports go: a vault-relative folder; empty: next to the note.
-    pub export_folder: String,
+    pub highlight_phrases: bool,
 }
 
 impl Default for Settings {
@@ -83,10 +82,9 @@ impl Default for Settings {
             last_has_claims: false,
             colour_codes: crate::colours::defaults(),
             links: Vec::new(),
-            export_colours: false,
-            export_format: "tilde".into(),
-            export_phrases: false,
-            export_folder: String::new(),
+            highlight_menu: true,
+            highlight_format: "tilde".into(),
+            highlight_phrases: false,
         }
     }
 }
@@ -136,10 +134,11 @@ pub enum ToWorker {
     Chunk { req: u32, text: String },
     End { req: u32, ok: bool },
     Rename { from: String, to: String },
-    /// Export a note (sent after its `Doc`) with its colours, computing those it lacks first; `header` opens it.
-    Export { req: u32, path: String, header: String },
-    /// Finish an export now with the colours there are (the server cannot answer).
-    ExportNow(u32),
+    /// Copy a selection ([from, to) in the note's UTF-16 offsets; sent after the note's `Doc`) with its highlights,
+    /// computing the colours its paragraphs lack first.
+    Copy { req: u32, path: String, from: u32, to: u32 },
+    /// Finish a copy now with the colours there are (the server cannot answer).
+    CopyNow(u32),
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -152,10 +151,10 @@ pub enum FromWorker {
     Marks { view: u32, version: u32, marks: Vec<(u32, u32, u8)> },
     /// [start, end, mask of kinds] in the block's text.
     Wrap { block: u32, segs: Vec<(u32, u32, u32)> },
-    /// An export waits for the colours of `missing` paragraphs.
-    ExportWaiting { req: u32, missing: u32 },
-    /// An export's text, the markers in it, and the paragraphs still without colours; `ok` false: no such note.
-    Exported { req: u32, text: String, markers: u32, missing: u32, ok: bool },
+    /// A copy waits for the colours of `missing` paragraphs.
+    CopyWaiting { req: u32, missing: u32 },
+    /// A copy's text, the markers in it, and the paragraphs still without colours; `ok` false: no such note.
+    Copied { req: u32, text: String, markers: u32, missing: u32, ok: bool },
 }
 
 pub fn encode<T: Serialize>(m: &T) -> Vec<u8> {
